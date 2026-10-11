@@ -1,0 +1,123 @@
+﻿# LinkedIn Job Bot (CDP + Playwright)
+
+Simple Python app for LinkedIn job discovery with a persistent Chrome profile, SQLite storage, and a 15-minute scheduler.
+
+## Requirements
+
+- Python 3.12+
+- Google Chrome installed
+- Windows or Linux
+
+## Setup
+
+1. Create and activate a virtual environment.
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+```
+
+2. Install dependencies.
+
+```powershell
+pip install -r requirements.txt
+```
+
+3. Install Playwright browser tooling.
+
+```powershell
+python -m playwright install chromium
+```
+
+4. Create `.env` from the example.
+
+```powershell
+Copy-Item .env.example .env
+```
+
+5. Optional: set `CHROME_EXECUTABLE_PATH` in `.env` if Chrome is not auto-detected.
+
+## CDP and Chrome Configuration
+
+Environment variables:
+
+- `AUTOMATION_ENABLED` kill switch (`true`/`false`)
+- `CHROME_EXECUTABLE_PATH` optional explicit path to Chrome
+- `CHROME_DEBUG_PORT` default `9222`
+- `CHROME_CDP_URL` must be localhost URL (default `http://127.0.0.1:9222`)
+- `CHROME_USER_DATA_DIR` default `./data/chrome-profile`
+- `KEEP_CHROME_OPEN` keep Chrome running on exit (`true`/`false`)
+- `SQLITE_DB_PATH` default `./data/jobs.db`
+- `SEARCH_INTERVAL_MINUTES` default `15`
+- `SEARCH_LAST_24H_ONLY` default `true` (adds LinkedIn `f_TPR=r86400`)
+- `SEARCH_QUERIES` format: `keyword|location;keyword|location`
+
+Default searches:
+
+- `Java Software Engineer | Egypt`
+
+## Manual LinkedIn Authentication
+
+Run setup mode once, log in manually in Chrome, then stop with `Ctrl+C`.
+
+```powershell
+python -m app.main --setup
+```
+
+This app does not enter credentials automatically.
+
+## Running
+
+One-time search cycle:
+
+```powershell
+python -m app.main --once
+```
+
+Status summary (jobs/applications counts by status):
+
+```powershell
+python -m app.main --status
+```
+
+Continuous mode (immediate run + every 15 minutes):
+
+```powershell
+python -m app.main
+```
+
+## Database
+
+SQLite file location is controlled by `SQLITE_DB_PATH` (default `data/jobs.db`).
+
+Tables:
+
+- `jobs`
+- `applications`
+
+Duplicate prevention uses `source + external_id`, and falls back to a hash of normalized URL if external ID is missing.
+`jobs.apply_method` stores `EASY_APPLY`, `EXTERNAL`, or `UNKNOWN`.
+
+## Tests
+
+Tests mock browser interactions and do not require a LinkedIn account.
+
+```powershell
+pytest -q
+```
+
+Covered:
+
+- URL normalization
+- duplicate job prevention
+- database CRUD
+- job status transitions
+- config validation
+- scheduler overlap prevention
+- job cycle behavior under failures/restrictions
+
+## Known Limitations
+
+- LinkedIn markup can change and may require selector updates in `app/linkedin.py`.
+- Access restrictions (CAPTCHA/verification) stop the affected cycle by design.
+- No automatic application submission is implemented yet (manual review flow only).
