@@ -50,6 +50,7 @@ Environment variables:
 - `SQLITE_DB_PATH` default `./data/jobs.db`
 - `SEARCH_INTERVAL_MINUTES` default `15`
 - `SEARCH_LAST_24H_ONLY` default `true` (adds LinkedIn `f_TPR=r86400`)
+- `APPLICATION_SCORE_THRESHOLD` default `60` (promotes `NEW` jobs to `READY_FOR_REVIEW` when score >= threshold)
 - `SEARCH_QUERIES` format: `keyword|location;keyword|location`
 
 Default searches:
@@ -97,6 +98,14 @@ Tables:
 
 Duplicate prevention uses `source + external_id`, and falls back to a hash of normalized URL if external ID is missing.
 `jobs.apply_method` stores `EASY_APPLY`, `EXTERNAL`, or `UNKNOWN`.
+`jobs.score` and `jobs.score_keywords` store rule-based scoring output.
+
+Scoring (max 90):
+
+- Title contains `Java` or `Spring`: `60`
+- Otherwise title contains `Backend`, `Full Stack`, `Software Engineer`, or `Software Developer`: `30`
+- Description contains `Java`: `+15`
+- Description contains `Spring`: `+15`
 
 ## Tests
 

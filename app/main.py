@@ -59,7 +59,7 @@ def main() -> int:
         logger.warning("AUTOMATION_ENABLED=false. Exiting without running automation.")
         return 0
 
-    db = Database(config.db_path)
+    db = Database(config.db_path, application_score_threshold=config.application_score_threshold)
 
     if args.status:
         show_status(db)

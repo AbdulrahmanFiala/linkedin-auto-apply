@@ -22,6 +22,7 @@ class Config:
     db_path: Path
     search_interval_minutes: int
     search_last_24h_only: bool
+    application_score_threshold: int
     search_queries: List[SearchQuery]
 
 
@@ -73,6 +74,8 @@ def validate_config(config: Config) -> None:
         raise ValueError("SEARCH_INTERVAL_MINUTES must be > 0")
     if not config.search_queries:
         raise ValueError("At least one search query is required")
+    if config.application_score_threshold < 0 or config.application_score_threshold > 90:
+        raise ValueError("APPLICATION_SCORE_THRESHOLD must be between 0 and 90")
 
     parsed = urlparse(config.chrome_cdp_url)
     if parsed.hostname not in {"127.0.0.1", "localhost"}:
@@ -103,6 +106,7 @@ def load_config() -> Config:
         db_path=db_path,
         search_interval_minutes=_int_env("SEARCH_INTERVAL_MINUTES", 15),
         search_last_24h_only=_bool_env("SEARCH_LAST_24H_ONLY", True),
+        application_score_threshold=_int_env("APPLICATION_SCORE_THRESHOLD", 60),
         search_queries=_queries_from_env(),
     )
 

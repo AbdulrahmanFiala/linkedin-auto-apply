@@ -1,4 +1,5 @@
-﻿from datetime import UTC, datetime
+import json
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -116,6 +117,64 @@ def test_apply_method_persist_and_fill_if_unknown(tmp_path) -> None:
     assert row["apply_method"] == ApplyMethod.EASY_APPLY.value
 
 
+def test_scoring_persisted_and_ready_for_review_threshold(tmp_path) -> None:
+    db = Database(tmp_path / "test.db", application_score_threshold=60)
+    job = make_job(
+        "https://www.linkedin.com/jobs/view/333",
+        "333",
+        title="Java Developer",
+    )
+    job.description = "JavaScript only"
+    job_id, _ = db.upsert_job(job)
+
+    row = db.get_job(job_id)
+    assert row is not None
+    assert int(row["score"]) == 60
+    assert row["status"] == JobStatus.READY_FOR_REVIEW.value
+    keywords = json.loads(row["score_keywords"])
+    assert "title:java" in keywords
+    assert "description:java" not in keywords
+
+
+def test_backfill_job_scores_updates_existing_rows(tmp_path) -> None:
+    db = Database(tmp_path / "test.db", application_score_threshold=60)
+    with db.transaction() as conn:
+        conn.execute(
+            """
+            INSERT INTO jobs (
+                source, external_id, url, title, company, location, description,
+                posted_at, discovered_at, apply_method, score, score_keywords, scored_at, status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "linkedin",
+                "444",
+                "https://www.linkedin.com/jobs/view/444",
+                "Backend Engineer",
+                "Acme",
+                "Egypt",
+                "Java and Spring Framework",
+                None,
+                datetime.now(UTC).isoformat(),
+                ApplyMethod.UNKNOWN.value,
+                0,
+                "[]",
+                None,
+                JobStatus.NEW.value,
+            ),
+        )
+        job_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+
+    updated = db.backfill_job_scores(limit=10)
+    assert updated == 1
+
+    row = db.get_job(job_id)
+    assert row is not None
+    assert int(row["score"]) == 60
+    assert row["status"] == JobStatus.READY_FOR_REVIEW.value
+    assert row["scored_at"]
+
+
 def test_configuration_validation_rejects_non_localhost_cdp() -> None:
     cfg = Config(
         automation_enabled=True,
@@ -127,10 +186,30 @@ def test_configuration_validation_rejects_non_localhost_cdp() -> None:
         db_path=Path("./data/jobs.db"),
         search_interval_minutes=15,
         search_last_24h_only=True,
+        application_score_threshold=60,
         search_queries=[SearchQuery("Java", "Egypt")],
     )
 
     with pytest.raises(ValueError, match="localhost"):
+        validate_config(cfg)
+
+
+def test_configuration_validation_rejects_invalid_threshold() -> None:
+    cfg = Config(
+        automation_enabled=True,
+        chrome_executable_path=None,
+        chrome_debug_port=9222,
+        chrome_cdp_url="http://127.0.0.1:9222",
+        chrome_user_data_dir=Path("./data/chrome-profile"),
+        keep_chrome_open=True,
+        db_path=Path("./data/jobs.db"),
+        search_interval_minutes=15,
+        search_last_24h_only=True,
+        application_score_threshold=120,
+        search_queries=[SearchQuery("Java", "Egypt")],
+    )
+
+    with pytest.raises(ValueError, match="APPLICATION_SCORE_THRESHOLD"):
         validate_config(cfg)
 
 
@@ -141,6 +220,7 @@ def test_load_config_from_env(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("SQLITE_DB_PATH", str(tmp_path / "jobs.db"))
     monkeypatch.setenv("SEARCH_INTERVAL_MINUTES", "15")
     monkeypatch.setenv("SEARCH_LAST_24H_ONLY", "true")
+    monkeypatch.setenv("APPLICATION_SCORE_THRESHOLD", "60")
     monkeypatch.setenv("SEARCH_QUERIES", "Java Backend Engineer|Egypt;Java Software Engineer|Remote")
 
     cfg = load_config()
@@ -148,5 +228,6 @@ def test_load_config_from_env(monkeypatch, tmp_path) -> None:
     assert cfg.chrome_debug_port == 9333
     assert cfg.chrome_cdp_url == "http://127.0.0.1:9333"
     assert cfg.search_last_24h_only is True
+    assert cfg.application_score_threshold == 60
     assert len(cfg.search_queries) == 2
     assert cfg.search_queries[0].keyword == "Java Backend Engineer"

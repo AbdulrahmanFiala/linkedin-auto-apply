@@ -50,8 +50,11 @@ class FakeDatabase:
     def list_jobs_needing_metadata(self, limit=50):
         return []
 
-    def update_job_metadata_if_missing(self, job_id, title, company, posted_at, apply_method):
+    def update_job_metadata_if_missing(self, job_id, title, company, description, posted_at, apply_method):
         return None
+
+    def backfill_job_scores(self, limit=500):
+        return 0
 
 
 class FakeLinkedInClient:
@@ -94,6 +97,7 @@ def make_config() -> Config:
         db_path=Path("./data/jobs.db"),
         search_interval_minutes=15,
         search_last_24h_only=True,
+        application_score_threshold=60,
         search_queries=[SearchQuery("Java", "Egypt")],
     )
 

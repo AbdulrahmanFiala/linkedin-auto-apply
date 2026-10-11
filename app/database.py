@@ -1,5 +1,6 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
+import json
 import logging
 import sqlite3
 import time
@@ -9,6 +10,7 @@ from pathlib import Path
 from typing import Callable, Iterator, TypeVar
 
 from .models import ApplicationStatus, ApplyMethod, DiscoveredJob, JobStatus, fallback_external_id
+from .scoring import calculate_job_score
 
 T = TypeVar("T")
 logger = logging.getLogger(__name__)
@@ -18,12 +20,14 @@ class Database:
     LOCK_RETRY_ATTEMPTS = 4
     LOCK_RETRY_DELAY_SECONDS = 0.35
 
-    def __init__(self, db_path: Path):
+    def __init__(self, db_path: Path, application_score_threshold: int = 60):
         self.db_path = db_path
+        self.application_score_threshold = application_score_threshold
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         if not self._schema_exists():
             self._run_with_lock_retry(self._initialize)
         self._run_with_lock_retry(self._ensure_jobs_apply_method_column)
+        self._run_with_lock_retry(self._ensure_jobs_scoring_columns)
         self._run_with_lock_retry(self._normalize_posted_at_placeholders)
 
     def _connect(self) -> sqlite3.Connection:
@@ -89,6 +93,9 @@ class Database:
                     posted_at TEXT,
                     discovered_at TEXT NOT NULL,
                     apply_method TEXT NOT NULL DEFAULT 'UNKNOWN',
+                    score INTEGER NOT NULL DEFAULT 0,
+                    score_keywords TEXT NOT NULL DEFAULT '[]',
+                    scored_at TEXT,
                     status TEXT NOT NULL,
                     UNIQUE(source, external_id)
                 );
@@ -113,6 +120,17 @@ class Database:
                 conn.execute(
                     "ALTER TABLE jobs ADD COLUMN apply_method TEXT NOT NULL DEFAULT 'UNKNOWN'"
                 )
+
+    def _ensure_jobs_scoring_columns(self) -> None:
+        with self.transaction() as conn:
+            columns = conn.execute("PRAGMA table_info(jobs)").fetchall()
+            names = {str(row["name"]) for row in columns}
+            if "score" not in names:
+                conn.execute("ALTER TABLE jobs ADD COLUMN score INTEGER NOT NULL DEFAULT 0")
+            if "score_keywords" not in names:
+                conn.execute("ALTER TABLE jobs ADD COLUMN score_keywords TEXT NOT NULL DEFAULT '[]'")
+            if "scored_at" not in names:
+                conn.execute("ALTER TABLE jobs ADD COLUMN scored_at TEXT")
 
     def _normalize_posted_at_placeholders(self) -> None:
         with self.transaction() as conn:
@@ -139,11 +157,62 @@ class Database:
             ).fetchone()
             return bool(row and int(row[0]) == 2)
 
+    def _score_values(self, title: str | None, description: str | None) -> tuple[int, str, str]:
+        result = calculate_job_score(title, description)
+        keywords_json = json.dumps(result.matched_keywords, separators=(",", ":"))
+        return result.score, keywords_json, datetime.now(UTC).isoformat()
+
+    def _promoted_status(self, status: str, score: int) -> str:
+        if status == JobStatus.NEW.value and score >= self.application_score_threshold:
+            return JobStatus.READY_FOR_REVIEW.value
+        return status
+
+    def _rescore_job_in_conn(self, conn: sqlite3.Connection, job_id: int) -> bool:
+        row = conn.execute(
+            """
+            SELECT id, title, description, status, score, score_keywords, scored_at
+            FROM jobs
+            WHERE id = ?
+            """,
+            (job_id,),
+        ).fetchone()
+        if not row:
+            return False
+
+        score, keywords_json, scored_at = self._score_values(row["title"], row["description"])
+        promoted_status = self._promoted_status(str(row["status"]), score)
+
+        updates: list[str] = []
+        values: list[object] = []
+        current_score = int(row["score"] or 0)
+        current_keywords = str(row["score_keywords"] or "[]")
+        current_scored_at = (row["scored_at"] or "").strip()
+
+        if current_score != score:
+            updates.append("score = ?")
+            values.append(score)
+        if current_keywords != keywords_json:
+            updates.append("score_keywords = ?")
+            values.append(keywords_json)
+        if not current_scored_at:
+            updates.append("scored_at = ?")
+            values.append(scored_at)
+        if str(row["status"]) != promoted_status:
+            updates.append("status = ?")
+            values.append(promoted_status)
+
+        if not updates:
+            return False
+
+        values.append(job_id)
+        conn.execute(f"UPDATE jobs SET {', '.join(updates)} WHERE id = ?", tuple(values))
+        return True
+
     def _upsert_job_in_conn(self, conn: sqlite3.Connection, job: DiscoveredJob) -> tuple[int, bool]:
         ext_id = job.external_id or fallback_external_id(job.url)
         existing = conn.execute(
             """
-            SELECT id, title, company, posted_at, discovered_at, apply_method
+            SELECT id, title, company, description, posted_at, discovered_at, apply_method
             FROM jobs
             WHERE source = ? AND external_id = ?
             """,
@@ -163,6 +232,11 @@ class Database:
                 updates.append("company = ?")
                 values.append(job.company)
 
+            existing_description = (existing["description"] or "").strip()
+            if (not existing_description) and job.description and job.description.strip():
+                updates.append("description = ?")
+                values.append(job.description.strip())
+
             existing_posted = (existing["posted_at"] or "").strip()
             existing_discovered = (existing["discovered_at"] or "").strip()
             if (not existing_posted or existing_posted == existing_discovered) and job.posted_at:
@@ -181,14 +255,24 @@ class Database:
             if updates:
                 values.append(existing["id"])
                 conn.execute(f"UPDATE jobs SET {', '.join(updates)} WHERE id = ?", tuple(values))
+
+            self._rescore_job_in_conn(conn, int(existing["id"]))
             return int(existing["id"]), False
+
+        score, keywords_json, scored_at = self._score_values(job.title, job.description)
+        status = (
+            JobStatus.READY_FOR_REVIEW.value
+            if score >= self.application_score_threshold
+            else JobStatus.NEW.value
+        )
 
         cursor = conn.execute(
             """
             INSERT INTO jobs (
                 source, external_id, url, title, company, location,
-                description, posted_at, discovered_at, apply_method, status
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                description, posted_at, discovered_at, apply_method,
+                score, score_keywords, scored_at, status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 job.source,
@@ -201,7 +285,10 @@ class Database:
                 job.posted_at,
                 job.discovered_at.isoformat(),
                 job.apply_method or ApplyMethod.UNKNOWN.value,
-                JobStatus.NEW.value,
+                score,
+                keywords_json,
+                scored_at,
+                status,
             ),
         )
         return int(cursor.lastrowid), True
@@ -296,6 +383,7 @@ class Database:
                 WHERE (posted_at IS NULL OR TRIM(posted_at) = '')
                    OR (title IS NULL OR TRIM(title) = '' OR title = 'Unknown title')
                    OR (company IS NULL OR TRIM(company) = '' OR company = 'Unknown company')
+                   OR (description IS NULL OR TRIM(description) = '')
                    OR (apply_method IS NULL OR TRIM(apply_method) = '' OR apply_method = 'UNKNOWN')
                 ORDER BY id DESC
                 LIMIT ?
@@ -308,6 +396,7 @@ class Database:
         job_id: int,
         title: str | None,
         company: str | None,
+        description: str | None,
         posted_at: str | None,
         apply_method: str | None,
     ) -> None:
@@ -332,6 +421,16 @@ class Database:
                           AND (company IS NULL OR TRIM(company) = '' OR company = 'Unknown company')
                         """,
                         (company.strip(), job_id),
+                    )
+                if description and description.strip():
+                    conn.execute(
+                        """
+                        UPDATE jobs
+                        SET description = ?
+                        WHERE id = ?
+                          AND (description IS NULL OR TRIM(description) = '')
+                        """,
+                        (description.strip(), job_id),
                     )
                 if posted_at and posted_at.strip():
                     conn.execute(
@@ -358,4 +457,29 @@ class Database:
                         (apply_method.strip(), job_id),
                     )
 
+                self._rescore_job_in_conn(conn, job_id)
+
         self._run_with_lock_retry(action)
+
+    def backfill_job_scores(self, limit: int = 500) -> int:
+        def action() -> int:
+            with self.transaction() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT id
+                    FROM jobs
+                    WHERE scored_at IS NULL
+                       OR score_keywords IS NULL
+                       OR TRIM(score_keywords) = ''
+                    ORDER BY id ASC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
+                updated = 0
+                for row in rows:
+                    if self._rescore_job_in_conn(conn, int(row["id"])):
+                        updated += 1
+                return updated
+
+        return self._run_with_lock_retry(action)

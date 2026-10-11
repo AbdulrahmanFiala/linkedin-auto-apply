@@ -83,6 +83,9 @@ class JobDiscoveryService:
 
         logger.info("Search cycle completed in %.2fs", time.time() - start)
         self._backfill_missing_metadata()
+        rescored = self.database.backfill_job_scores(limit=500)
+        if rescored:
+            logger.info("Score backfill complete. rescored_jobs=%d", rescored)
         return results
 
     def _backfill_missing_metadata(self) -> None:
@@ -119,12 +122,15 @@ class JobDiscoveryService:
                 int(row["id"]),
                 job.title,
                 job.company,
+                job.description,
                 job.posted_at,
                 job.apply_method,
             )
             if (not before_title or before_title == "Unknown title") and job.title != "Unknown title":
                 updated += 1
             elif (not before_company or before_company == "Unknown company") and job.company != "Unknown company":
+                updated += 1
+            elif (not (row["description"] or "").strip()) and (job.description or "").strip():
                 updated += 1
             elif (not before_posted) and job.posted_at:
                 updated += 1

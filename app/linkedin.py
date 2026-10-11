@@ -66,6 +66,14 @@ class LinkedInClient:
         ]
     )
     DETAIL_JSON_LD_SELECTOR = "script[type='application/ld+json']"
+    DETAIL_DESCRIPTION_SELECTORS = ", ".join(
+        [
+            ".show-more-less-html__markup",
+            ".jobs-description-content__text",
+            ".jobs-box__html-content",
+            "#job-details",
+        ]
+    )
     DETAIL_EASY_APPLY_SELECTORS = [
         "button:has-text('Easy Apply')",
         "button[aria-label*='Easy Apply']",
@@ -422,6 +430,7 @@ class LinkedInClient:
             enriched_posted = 0
             enriched_title = 0
             enriched_apply_method = 0
+            enriched_description = 0
             for idx, job in enumerate(targets, start=1):
                 if idx == 1 or idx % 5 == 0 or idx == len(targets):
                     logger.info("Detail enrichment progress: %d/%d", idx, len(targets))
@@ -442,6 +451,11 @@ class LinkedInClient:
                         if posted:
                             job.posted_at = posted
                             enriched_posted += 1
+                    if not job.description or not job.description.strip():
+                        description = self._description_from_detail_page(detail_page)
+                        if description:
+                            job.description = description
+                            enriched_description += 1
                     apply_method = self._apply_method_from_detail_page(detail_page)
                     if (
                         apply_method != ApplyMethod.UNKNOWN.value
@@ -458,9 +472,10 @@ class LinkedInClient:
                 except Exception:
                     logger.debug("Failed detail enrichment for job url=%s", job.url, exc_info=True)
             logger.info(
-                "Detail enrichment complete: company_enriched=%d posted_at_enriched=%d apply_method_enriched=%d unknown_company_remaining=%d missing_posted_remaining=%d unknown_apply_remaining=%d",
+                "Detail enrichment complete: company_enriched=%d posted_at_enriched=%d description_enriched=%d apply_method_enriched=%d unknown_company_remaining=%d missing_posted_remaining=%d unknown_apply_remaining=%d",
                 enriched_company,
                 enriched_posted,
+                enriched_description,
                 enriched_apply_method,
                 len([j for j in jobs if j.company == "Unknown company"]),
                 len([j for j in jobs if not j.posted_at]),
@@ -525,6 +540,68 @@ class LinkedInClient:
                 return self._parse_relative_posted_text(posted_match.group(1), discovered_at)
             if any(marker in lower for marker in ["ago", "today", "yesterday"]):
                 return self._parse_relative_posted_text(text, discovered_at)
+        return ""
+
+    def _description_from_detail_page(self, page) -> str:
+        locator = page.locator(self.DETAIL_DESCRIPTION_SELECTORS).first
+        description = ""
+        try:
+            description = (locator.inner_text(timeout=3000) or "").strip()
+        except Exception:
+            description = self._safe_text(locator)
+        if description:
+            return re.sub(r"\s+", " ", description).strip()
+
+        scripts = page.locator(self.DETAIL_JSON_LD_SELECTOR)
+        for i in range(scripts.count()):
+            try:
+                content = scripts.nth(i).text_content(timeout=600)
+                if not content:
+                    continue
+                payload = json.loads(content)
+                items = payload if isinstance(payload, list) else [payload]
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
+                    raw = item.get("description")
+                    if isinstance(raw, str) and raw.strip():
+                        text = re.sub(r"<[^>]+>", " ", raw)
+                        text = re.sub(r"\s+", " ", text).strip()
+                        if text:
+                            return text
+            except Exception:
+                continue
+
+        try:
+            body_text = page.locator("body").inner_text(timeout=4000)
+        except Exception:
+            body_text = ""
+
+        normalized = re.sub(r"\s+", " ", body_text or "").strip()
+        if not normalized:
+            return ""
+
+        low = normalized.lower()
+        about_idx = low.find("about the job")
+        if about_idx != -1:
+            segment = normalized[about_idx + len("about the job") : about_idx + len("about the job") + 7000]
+            stop_markers = [
+                "people also viewed",
+                "jobs you may like",
+                "set alert for similar jobs",
+                "meet the hiring team",
+                "about the company",
+                "report this job",
+            ]
+            segment_low = segment.lower()
+            cut = len(segment)
+            for marker in stop_markers:
+                idx = segment_low.find(marker)
+                if idx != -1 and idx < cut:
+                    cut = idx
+            segment = segment[:cut].strip(" |-:")
+            if len(segment) >= 80:
+                return segment
         return ""
 
     def _apply_method_from_detail_page(self, page) -> str:
