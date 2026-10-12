@@ -316,12 +316,52 @@ class LinkedInClient:
                     break
             break
 
+    def _job_cards_with_stable_count(self, page):
+        cards = page.locator(self.JOB_CARD_SELECTOR)
+        best_count = cards.count()
+        stable_reads = 0
+        for _ in range(8):
+            for selector in [
+                ".jobs-search-results-list",
+                ".jobs-search__results-list",
+                "div.scaffold-layout__list-container",
+            ]:
+                try:
+                    page.evaluate(
+                        """
+                        (sel) => {
+                            const el = document.querySelector(sel);
+                            if (!el) return false;
+                            el.scrollTop = el.scrollHeight;
+                            el.dispatchEvent(new Event('scroll', { bubbles: true }));
+                            return true;
+                        }
+                        """,
+                        selector,
+                    )
+                except Exception:
+                    continue
+            try:
+                page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            except Exception:
+                pass
+            page.wait_for_timeout(250)
+            current_count = cards.count()
+            if current_count > best_count:
+                best_count = current_count
+                stable_reads = 0
+                continue
+            if current_count == best_count:
+                stable_reads += 1
+                if stable_reads >= 2 and best_count >= self.PAGE_SIZE:
+                    break
+        return cards, best_count
+
     def _extract_current_page_jobs(self, page, query: SearchQuery) -> list[DiscoveredJob]:
         self._check_access_restriction(page)
         self._scroll_results(page)
 
-        cards = page.locator(self.JOB_CARD_SELECTOR)
-        total_cards = cards.count()
+        cards, total_cards = self._job_cards_with_stable_count(page)
         jobs: list[DiscoveredJob] = []
         seen_urls: set[str] = set()
         seen_ids: set[str] = set()

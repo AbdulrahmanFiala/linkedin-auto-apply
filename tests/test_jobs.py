@@ -177,6 +177,17 @@ class _FakeLocator:
         return self._count_value
 
 
+class _SequenceCountLocator:
+    def __init__(self, counts: list[int]):
+        self._counts = counts
+        self._index = 0
+
+    def count(self):
+        value = self._counts[min(self._index, len(self._counts) - 1)]
+        self._index += 1
+        return value
+
+
 class _FakePage:
     def __init__(self, *, url: str, title: str, content: str, selector_counts: dict[str, int]):
         self.url = url
@@ -192,6 +203,50 @@ class _FakePage:
 
     def locator(self, selector: str):
         return _FakeLocator(self._selector_counts.get(selector, 0))
+
+
+class _FakeDynamicCountPage(_FakePage):
+    def __init__(self, *, url: str, title: str, content: str, selector_counts: dict[str, int], cards_counts: list[int]):
+        super().__init__(url=url, title=title, content=content, selector_counts=selector_counts)
+        self._cards_locator = _SequenceCountLocator(cards_counts)
+        self.wait_calls = 0
+
+    def locator(self, selector: str):
+        if selector == LinkedInClient.JOB_CARD_SELECTOR:
+            return self._cards_locator
+        return super().locator(selector)
+
+    def wait_for_timeout(self, _timeout_ms: int):
+        self.wait_calls += 1
+
+
+class _FakeScrollNudgedCountPage(_FakePage):
+    def __init__(self, *, url: str, title: str, content: str, selector_counts: dict[str, int], cards_counts: list[int]):
+        super().__init__(url=url, title=title, content=content, selector_counts=selector_counts)
+        self._cards_counts = cards_counts
+        self._index = 0
+        self._nudged = False
+
+    class _DynamicCardsLocator:
+        def __init__(self, owner: "_FakeScrollNudgedCountPage"):
+            self._owner = owner
+
+        def count(self):
+            return self._owner._cards_counts[min(self._owner._index, len(self._owner._cards_counts) - 1)]
+
+    def locator(self, selector: str):
+        if selector == LinkedInClient.JOB_CARD_SELECTOR:
+            return self._DynamicCardsLocator(self)
+        return super().locator(selector)
+
+    def evaluate(self, _script: str, _selector: str | None = None):
+        self._nudged = True
+        return True
+
+    def wait_for_timeout(self, _timeout_ms: int):
+        if self._nudged:
+            self._index = min(self._index + 1, len(self._cards_counts) - 1)
+            self._nudged = False
 
 
 class _FakeContext:
@@ -259,3 +314,34 @@ def test_apply_method_text_detection() -> None:
 
     assert client._apply_method_from_texts(["Easy Apply", "Cairo"]) == ApplyMethod.EASY_APPLY.value
     assert client._apply_method_from_texts(["Apply on company website"]) == ApplyMethod.EXTERNAL.value
+
+
+def test_job_cards_with_stable_count_waits_for_late_first_page_cards() -> None:
+    client = LinkedInClient(_FakeContext(), make_config())
+    page = _FakeDynamicCountPage(
+        url="https://www.linkedin.com/jobs/search/?keywords=java",
+        title="LinkedIn Jobs",
+        content="",
+        selector_counts={},
+        cards_counts=[7, 7, 25, 25, 25],
+    )
+
+    _cards, total_cards = client._job_cards_with_stable_count(page)
+
+    assert total_cards == 25
+    assert page.wait_calls > 0
+
+
+def test_job_cards_with_stable_count_nudges_late_second_page_cards() -> None:
+    client = LinkedInClient(_FakeContext(), make_config())
+    page = _FakeScrollNudgedCountPage(
+        url="https://www.linkedin.com/jobs/search/?keywords=java&start=25",
+        title="LinkedIn Jobs",
+        content="",
+        selector_counts={},
+        cards_counts=[16, 16, 20, 25, 25],
+    )
+
+    _cards, total_cards = client._job_cards_with_stable_count(page)
+
+    assert total_cards == 25
