@@ -17,13 +17,14 @@ logger = logging.getLogger(__name__)
 
 
 class Database:
-    LOCK_RETRY_ATTEMPTS = 4
+    LOCK_RETRY_ATTEMPTS = 8
     LOCK_RETRY_DELAY_SECONDS = 0.35
 
     def __init__(self, db_path: Path, application_score_threshold: int = 60):
         self.db_path = db_path
         self.application_score_threshold = application_score_threshold
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._run_with_lock_retry(self._ensure_wal_mode)
         if not self._schema_exists():
             self._run_with_lock_retry(self._initialize)
         self._run_with_lock_retry(self._ensure_jobs_apply_method_column)
@@ -76,9 +77,12 @@ class Database:
             ) from last_error
         raise RuntimeError("Unexpected retry state")
 
+    def _ensure_wal_mode(self) -> None:
+        with self._connect() as conn:
+            conn.execute("PRAGMA journal_mode = WAL")
+
     def _initialize(self) -> None:
         with self.transaction() as conn:
-            conn.execute("PRAGMA journal_mode = WAL")
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS jobs (
@@ -113,23 +117,27 @@ class Database:
             )
 
     def _ensure_jobs_apply_method_column(self) -> None:
-        with self.transaction() as conn:
+        with self._connect() as conn:
             columns = conn.execute("PRAGMA table_info(jobs)").fetchall()
             names = {str(row["name"]) for row in columns}
-            if "apply_method" not in names:
+        if "apply_method" not in names:
+            with self.transaction() as conn:
                 conn.execute(
                     "ALTER TABLE jobs ADD COLUMN apply_method TEXT NOT NULL DEFAULT 'UNKNOWN'"
                 )
 
     def _ensure_jobs_scoring_columns(self) -> None:
-        with self.transaction() as conn:
+        with self._connect() as conn:
             columns = conn.execute("PRAGMA table_info(jobs)").fetchall()
             names = {str(row["name"]) for row in columns}
-            if "score" not in names:
+        if "score" not in names:
+            with self.transaction() as conn:
                 conn.execute("ALTER TABLE jobs ADD COLUMN score INTEGER NOT NULL DEFAULT 0")
-            if "score_keywords" not in names:
+        if "score_keywords" not in names:
+            with self.transaction() as conn:
                 conn.execute("ALTER TABLE jobs ADD COLUMN score_keywords TEXT NOT NULL DEFAULT '[]'")
-            if "scored_at" not in names:
+        if "scored_at" not in names:
+            with self.transaction() as conn:
                 conn.execute("ALTER TABLE jobs ADD COLUMN scored_at TEXT")
 
     def _normalize_posted_at_placeholders(self) -> None:
