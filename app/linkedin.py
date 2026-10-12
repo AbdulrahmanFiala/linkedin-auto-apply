@@ -5,7 +5,7 @@ import json
 import re
 from datetime import UTC, datetime, timedelta
 from typing import Optional
-from urllib.parse import quote_plus
+from urllib.parse import parse_qs, quote_plus, urlparse
 
 from playwright.sync_api import BrowserContext, TimeoutError
 
@@ -20,6 +20,14 @@ class AccessRestrictionError(RuntimeError):
 
 
 class LinkedInClient:
+    PAGE_SIZE = 25
+    MAX_PAGES_PER_QUERY = 20
+    NEXT_PAGE_SELECTORS = [
+        "button.artdeco-pagination__button--next",
+        "button[aria-label*='next' i]",
+        "li.artdeco-pagination__indicator--number.active + li button",
+        "li.artdeco-pagination__indicator--number--active + li button",
+    ]
     JOB_CARD_SELECTOR = ", ".join(
         [
             "li.jobs-search-results__list-item",
@@ -644,6 +652,34 @@ class LinkedInClient:
         higher = sorted(s for s in starts if s > current_start)
         return higher[0] if higher else None
 
+    def _start_from_url(self, url: str) -> int:
+        try:
+            start_value = parse_qs(urlparse(url).query).get("start", ["0"])[0]
+            return int(start_value)
+        except Exception:
+            return 0
+
+    def _is_disabled(self, locator) -> bool:
+        disabled_attr = self._safe_attr(locator, "disabled")
+        aria_disabled = self._safe_attr(locator, "aria-disabled").lower()
+        class_name = self._safe_attr(locator, "class").lower()
+        return bool(disabled_attr) or aria_disabled == "true" or "disabled" in class_name
+
+    def _click_next_page(self, page) -> bool:
+        for selector in self.NEXT_PAGE_SELECTORS:
+            try:
+                button = page.locator(selector).first
+                if button.count() == 0:
+                    continue
+                if self._is_disabled(button):
+                    continue
+                button.click(timeout=4000)
+                page.wait_for_timeout(1200)
+                return True
+            except Exception:
+                continue
+        return False
+
     def search_jobs(self, query: SearchQuery) -> list[DiscoveredJob]:
         page = self._ensure_page()
         all_jobs: list[DiscoveredJob] = []
@@ -652,16 +688,28 @@ class LinkedInClient:
         visited_starts: set[int] = set()
 
         start = 0
+        navigation_mode = "url"
+        page_count = 0
         while True:
+            page_count += 1
+            if page_count > self.MAX_PAGES_PER_QUERY:
+                logger.info(
+                    "Stopping pagination after max pages limit (%d) for query '%s'",
+                    self.MAX_PAGES_PER_QUERY,
+                    query.keyword,
+                )
+                break
+
             if start in visited_starts:
                 logger.info("Pagination loop detected at start=%d; stopping", start)
                 break
             visited_starts.add(start)
 
-            search_url = self._build_search_url(query, start=start)
-            logger.info("Navigating to %s", search_url)
-            page.goto(search_url, wait_until="domcontentloaded", timeout=45000)
-            page.wait_for_timeout(1200)
+            if navigation_mode == "url":
+                search_url = self._build_search_url(query, start=start)
+                logger.info("Navigating to %s", search_url)
+                page.goto(search_url, wait_until="domcontentloaded", timeout=45000)
+                page.wait_for_timeout(1200)
 
             try:
                 page.wait_for_selector(self.RESULTS_LINK_FALLBACK_SELECTOR, timeout=10000)
@@ -698,10 +746,27 @@ class LinkedInClient:
                 len(all_jobs),
             )
 
+            if self._click_next_page(page):
+                next_start_from_url = self._start_from_url(page.url)
+                if next_start_from_url <= start:
+                    next_start_from_url = start + self.PAGE_SIZE
+                logger.info("Moved to next page via UI pagination: start=%d", next_start_from_url)
+                start = next_start_from_url
+                navigation_mode = "ui"
+                continue
+
             next_start = self._next_start_from_pagination(page, start)
             if next_start is None:
-                logger.info("No next pagination page found from start=%d; finishing", start)
-                break
+                if navigation_mode == "ui":
+                    logger.info("Reached final pagination page for query '%s'", query.keyword)
+                    break
+                next_start = start + self.PAGE_SIZE
+                logger.info(
+                    "No pagination links from start=%d; using offset fallback next_start=%d",
+                    start,
+                    next_start,
+                )
             start = next_start
+            navigation_mode = "url"
 
         return all_jobs
