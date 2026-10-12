@@ -34,6 +34,18 @@ class JobDiscoveryService:
             logger.info("Starting search: keyword='%s', location='%s'", query.keyword, query.location)
             try:
                 jobs = self.linkedin_client.search_jobs(query)
+                new_jobs, existing_jobs_for_enrichment = self.database.split_new_and_existing_jobs(jobs)
+                if existing_jobs_for_enrichment:
+                    logger.info(
+                        "Skipping enrichment for existing DB jobs: %d/%d",
+                        len(existing_jobs_for_enrichment),
+                        len(jobs),
+                    )
+                if new_jobs:
+                    logger.info("Enriching metadata only for new DB jobs: %d/%d", len(new_jobs), len(jobs))
+                    self.linkedin_client.enrich_metadata_for_jobs(new_jobs)
+                else:
+                    logger.info("No new DB jobs to enrich on this page: 0/%d", len(jobs))
                 inserted, new_jobs, existing_jobs = self.database.upsert_jobs_bulk_detailed(jobs)
                 found = len(jobs)
                 duplicates = max(found - inserted, 0)

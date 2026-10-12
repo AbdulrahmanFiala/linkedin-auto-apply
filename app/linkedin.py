@@ -366,11 +366,13 @@ class LinkedInClient:
         seen_urls: set[str] = set()
         seen_ids: set[str] = set()
 
-        if total_cards == 0:
+        def _collect_fallback_jobs(limit: int | None = None) -> int:
             links = page.locator(self.RESULTS_LINK_FALLBACK_SELECTOR)
             link_total = links.count()
-            logger.info("Fallback link candidates=%d", link_total)
+            added = 0
             for idx in range(link_total):
+                if limit is not None and added >= limit:
+                    break
                 link = links.nth(idx)
                 href = self._normalize_job_url(self._safe_attr(link, "href"))
                 ext_id = self._extract_job_id(href)
@@ -396,6 +398,13 @@ class LinkedInClient:
                         apply_method=ApplyMethod.UNKNOWN.value,
                     )
                 )
+                added += 1
+            return added
+
+        if total_cards == 0:
+            link_total = page.locator(self.RESULTS_LINK_FALLBACK_SELECTOR).count()
+            logger.info("Fallback link candidates=%d", link_total)
+            _collect_fallback_jobs()
             logger.info("Fallback unique jobs=%d", len(jobs))
             return jobs
 
@@ -464,6 +473,16 @@ class LinkedInClient:
             skip_duplicate_url,
             skip_duplicate_id,
         )
+
+        if len(jobs) < min(total_cards, self.PAGE_SIZE):
+            missing = min(total_cards, self.PAGE_SIZE) - len(jobs)
+            added_from_fallback = _collect_fallback_jobs(limit=missing)
+            if added_from_fallback:
+                logger.info(
+                    "Supplemented page jobs via fallback links: +%d (now=%d)",
+                    added_from_fallback,
+                    len(jobs),
+                )
         return jobs
 
     def enrich_metadata_for_jobs(self, jobs: list[DiscoveredJob]) -> None:
@@ -760,7 +779,6 @@ class LinkedInClient:
             if not page_jobs:
                 logger.info("No jobs found on page start=%d; finishing pagination", start)
                 break
-            self.enrich_metadata_for_jobs(page_jobs)
 
             page_keys = tuple((job.external_id or job.url) for job in page_jobs[:10])
             if page_keys in seen_page_fingerprints:

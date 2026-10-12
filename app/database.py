@@ -305,6 +305,57 @@ class Database:
         inserted, _, _ = self.upsert_jobs_bulk_detailed(jobs)
         return inserted
 
+    def split_new_and_existing_jobs(self, jobs: list[DiscoveredJob]) -> tuple[list[DiscoveredJob], list[DiscoveredJob]]:
+        if not jobs:
+            return [], []
+
+        def action() -> tuple[list[DiscoveredJob], list[DiscoveredJob]]:
+            keys: list[tuple[str, str]] = []
+            seen_keys: set[tuple[str, str]] = set()
+            for job in jobs:
+                key = (job.source, job.external_id or fallback_external_id(job.url))
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                keys.append(key)
+
+            if not keys:
+                return [], list(jobs)
+
+            placeholders = ", ".join(["(?, ?)"] * len(keys))
+            params: list[str] = []
+            for source, external_id in keys:
+                params.extend([source, external_id])
+
+            with self._connect() as conn:
+                rows = conn.execute(
+                    f"""
+                    SELECT source, external_id
+                    FROM jobs
+                    WHERE (source, external_id) IN ({placeholders})
+                    """,
+                    tuple(params),
+                ).fetchall()
+
+            existing_keys = {(str(row["source"]), str(row["external_id"])) for row in rows}
+
+            new_jobs: list[DiscoveredJob] = []
+            existing_jobs: list[DiscoveredJob] = []
+            seen_new_keys: set[tuple[str, str]] = set()
+            for job in jobs:
+                key = (job.source, job.external_id or fallback_external_id(job.url))
+                if key in existing_keys:
+                    existing_jobs.append(job)
+                    continue
+                if key in seen_new_keys:
+                    continue
+                seen_new_keys.add(key)
+                new_jobs.append(job)
+
+            return new_jobs, existing_jobs
+
+        return self._run_with_lock_retry(action)
+
     def upsert_jobs_bulk_detailed(self, jobs: list[DiscoveredJob]) -> tuple[int, list[str], list[str]]:
         def action() -> tuple[int, list[str], list[str]]:
             inserted = 0
