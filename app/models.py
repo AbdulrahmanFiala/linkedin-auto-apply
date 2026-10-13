@@ -7,6 +7,8 @@ from typing import Optional
 
 class JobStatus(StrEnum):
     NEW = "NEW"
+    SENT_TO_RELEVANT_JOBS = "SENT_TO_RELEVANT_JOBS"
+    SENT_TO_NON_RELEVANT_JOBS = "SENT_TO_NON_RELEVANT_JOBS"
     QUEUED = "QUEUED"
     READY_FOR_REVIEW = "READY_FOR_REVIEW"
     APPLIED = "APPLIED"

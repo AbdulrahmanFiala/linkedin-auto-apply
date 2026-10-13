@@ -130,7 +130,7 @@ def test_scoring_persisted_and_ready_for_review_threshold(tmp_path) -> None:
     row = db.get_job(job_id)
     assert row is not None
     assert int(row["score"]) == 60
-    assert row["status"] == JobStatus.READY_FOR_REVIEW.value
+    assert row["status"] == JobStatus.NEW.value
     keywords = json.loads(row["score_keywords"])
     assert "title:java" in keywords
     assert "description:java" not in keywords
@@ -171,7 +171,7 @@ def test_backfill_job_scores_updates_existing_rows(tmp_path) -> None:
     row = db.get_job(job_id)
     assert row is not None
     assert int(row["score"]) == 60
-    assert row["status"] == JobStatus.READY_FOR_REVIEW.value
+    assert row["status"] == JobStatus.NEW.value
     assert row["scored_at"]
 
 
@@ -187,6 +187,11 @@ def test_configuration_validation_rejects_non_localhost_cdp() -> None:
         search_interval_minutes=15,
         search_last_24h_only=True,
         application_score_threshold=60,
+        telegram_enabled=False,
+        telegram_bot_token=None,
+        telegram_relevant_jobs_chat_id=None,
+        telegram_non_relevant_jobs_chat_id=None,
+        telegram_relevant_score_threshold=30,
         search_queries=[SearchQuery("Java", "Egypt")],
     )
 
@@ -206,6 +211,11 @@ def test_configuration_validation_rejects_invalid_threshold() -> None:
         search_interval_minutes=15,
         search_last_24h_only=True,
         application_score_threshold=120,
+        telegram_enabled=False,
+        telegram_bot_token=None,
+        telegram_relevant_jobs_chat_id=None,
+        telegram_non_relevant_jobs_chat_id=None,
+        telegram_relevant_score_threshold=30,
         search_queries=[SearchQuery("Java", "Egypt")],
     )
 

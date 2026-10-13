@@ -50,7 +50,12 @@ Environment variables:
 - `SQLITE_DB_PATH` default `./data/jobs.db`
 - `SEARCH_INTERVAL_MINUTES` default `15`
 - `SEARCH_LAST_24H_ONLY` default `true` (adds LinkedIn `f_TPR=r86400`)
-- `APPLICATION_SCORE_THRESHOLD` default `60` (promotes `NEW` jobs to `READY_FOR_REVIEW` when score >= threshold)
+- `APPLICATION_SCORE_THRESHOLD` default `60` (used for score calculation only)
+- `TELEGRAM_ENABLED` default `false`
+- `TELEGRAM_BOT_TOKEN` required when `TELEGRAM_ENABLED=true`
+- `TELEGRAM_RELEVANT_JOBS_CHAT_ID` required when `TELEGRAM_ENABLED=true`
+- `TELEGRAM_NON_RELEVANT_JOBS_CHAT_ID` required when `TELEGRAM_ENABLED=true`
+- `TELEGRAM_RELEVANT_SCORE_THRESHOLD` default `30` (scores `>= threshold` go to `Relevant Jobs`, lower scores to `Non-Relevant Jobs`)
 - `SEARCH_QUERIES` format: `keyword|location;keyword|location`
 
 Default searches:
@@ -99,6 +104,8 @@ Tables:
 Duplicate prevention uses `source + external_id`, and falls back to a hash of normalized URL if external ID is missing.
 `jobs.apply_method` stores `EASY_APPLY`, `EXTERNAL`, or `UNKNOWN`.
 `jobs.score` and `jobs.score_keywords` store rule-based scoring output.
+All newly inserted jobs are stored as `NEW` and remain `NEW` until Telegram delivery succeeds.
+After successful delivery, status becomes `SENT_TO_RELEVANT_JOBS` or `SENT_TO_NON_RELEVANT_JOBS` based on score.
 
 Scoring (max 90):
 

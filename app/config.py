@@ -23,6 +23,11 @@ class Config:
     search_interval_minutes: int
     search_last_24h_only: bool
     application_score_threshold: int
+    telegram_enabled: bool
+    telegram_bot_token: str | None
+    telegram_relevant_jobs_chat_id: str | None
+    telegram_non_relevant_jobs_chat_id: str | None
+    telegram_relevant_score_threshold: int
     search_queries: List[SearchQuery]
 
 
@@ -76,10 +81,19 @@ def validate_config(config: Config) -> None:
         raise ValueError("At least one search query is required")
     if config.application_score_threshold < 0 or config.application_score_threshold > 90:
         raise ValueError("APPLICATION_SCORE_THRESHOLD must be between 0 and 90")
+    if config.telegram_relevant_score_threshold < 0 or config.telegram_relevant_score_threshold > 100:
+        raise ValueError("TELEGRAM_RELEVANT_SCORE_THRESHOLD must be between 0 and 100")
 
     parsed = urlparse(config.chrome_cdp_url)
     if parsed.hostname not in {"127.0.0.1", "localhost"}:
         raise ValueError("CHROME_CDP_URL must point to localhost only")
+    if config.telegram_enabled:
+        if not config.telegram_bot_token:
+            raise ValueError("TELEGRAM_BOT_TOKEN is required when TELEGRAM_ENABLED=true")
+        if not config.telegram_relevant_jobs_chat_id:
+            raise ValueError("TELEGRAM_RELEVANT_JOBS_CHAT_ID is required when TELEGRAM_ENABLED=true")
+        if not config.telegram_non_relevant_jobs_chat_id:
+            raise ValueError("TELEGRAM_NON_RELEVANT_JOBS_CHAT_ID is required when TELEGRAM_ENABLED=true")
 
 
 def load_config() -> Config:
@@ -107,6 +121,11 @@ def load_config() -> Config:
         search_interval_minutes=_int_env("SEARCH_INTERVAL_MINUTES", 15),
         search_last_24h_only=_bool_env("SEARCH_LAST_24H_ONLY", True),
         application_score_threshold=_int_env("APPLICATION_SCORE_THRESHOLD", 60),
+        telegram_enabled=_bool_env("TELEGRAM_ENABLED", False),
+        telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN") or None,
+        telegram_relevant_jobs_chat_id=os.getenv("TELEGRAM_RELEVANT_JOBS_CHAT_ID") or None,
+        telegram_non_relevant_jobs_chat_id=os.getenv("TELEGRAM_NON_RELEVANT_JOBS_CHAT_ID") or None,
+        telegram_relevant_score_threshold=_int_env("TELEGRAM_RELEVANT_SCORE_THRESHOLD", 30),
         search_queries=_queries_from_env(),
     )
 

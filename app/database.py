@@ -170,11 +170,6 @@ class Database:
         keywords_json = json.dumps(result.matched_keywords, separators=(",", ":"))
         return result.score, keywords_json, datetime.now(UTC).isoformat()
 
-    def _promoted_status(self, status: str, score: int) -> str:
-        if status == JobStatus.NEW.value and score >= self.application_score_threshold:
-            return JobStatus.READY_FOR_REVIEW.value
-        return status
-
     def _rescore_job_in_conn(self, conn: sqlite3.Connection, job_id: int) -> bool:
         row = conn.execute(
             """
@@ -188,8 +183,6 @@ class Database:
             return False
 
         score, keywords_json, scored_at = self._score_values(row["title"], row["description"])
-        promoted_status = self._promoted_status(str(row["status"]), score)
-
         updates: list[str] = []
         values: list[object] = []
         current_score = int(row["score"] or 0)
@@ -205,10 +198,6 @@ class Database:
         if not current_scored_at:
             updates.append("scored_at = ?")
             values.append(scored_at)
-        if str(row["status"]) != promoted_status:
-            updates.append("status = ?")
-            values.append(promoted_status)
-
         if not updates:
             return False
 
@@ -268,11 +257,7 @@ class Database:
             return int(existing["id"]), False
 
         score, keywords_json, scored_at = self._score_values(job.title, job.description)
-        status = (
-            JobStatus.READY_FOR_REVIEW.value
-            if score >= self.application_score_threshold
-            else JobStatus.NEW.value
-        )
+        status = JobStatus.NEW.value
 
         cursor = conn.execute(
             """
@@ -392,6 +377,20 @@ class Database:
                 conn.execute("UPDATE jobs SET status = ? WHERE id = ?", (status.value, job_id))
 
         self._run_with_lock_retry(action)
+
+    def list_jobs_by_status(self, status: JobStatus, limit: int = 100) -> list[sqlite3.Row]:
+        with self._connect() as conn:
+            return conn.execute(
+                """
+                SELECT id, source, external_id, url, title, company, location, description,
+                       posted_at, discovered_at, apply_method, score, score_keywords, scored_at, status
+                FROM jobs
+                WHERE status = ?
+                ORDER BY id ASC
+                LIMIT ?
+                """,
+                (status.value, limit),
+            ).fetchall()
 
     def create_application(self, job_id: int, status: ApplicationStatus, notes: str | None = None) -> int:
         def action() -> int:

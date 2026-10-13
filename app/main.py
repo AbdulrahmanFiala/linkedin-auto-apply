@@ -13,6 +13,7 @@ from .database import Database
 from .jobs import JobDiscoveryService
 from .linkedin import AccessRestrictionError, LinkedInClient
 from .scheduler import SearchScheduler
+from .telegram import TelegramJobNotifier
 
 
 logger = logging.getLogger(__name__)
@@ -41,7 +42,15 @@ def show_status(db: Database) -> None:
 
 
 def run_once(config, db: Database, linkedin: LinkedInClient) -> int:
-    service = JobDiscoveryService(db, linkedin)
+    notifier = None
+    if config.telegram_enabled and config.telegram_bot_token:
+        notifier = TelegramJobNotifier(
+            bot_token=config.telegram_bot_token,
+            relevant_jobs_chat_id=config.telegram_relevant_jobs_chat_id or "",
+            non_relevant_jobs_chat_id=config.telegram_non_relevant_jobs_chat_id or "",
+            relevant_score_threshold=config.telegram_relevant_score_threshold,
+        )
+    service = JobDiscoveryService(db, linkedin, telegram_notifier=notifier)
     try:
         service.run_cycle(config.search_queries)
         return 0

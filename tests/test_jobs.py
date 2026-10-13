@@ -8,7 +8,7 @@ import pytest
 from app.config import Config
 from app.jobs import JobDiscoveryService
 from app.linkedin import AccessRestrictionError, LinkedInClient
-from app.models import ApplyMethod, DiscoveredJob, SearchQuery
+from app.models import ApplyMethod, DiscoveredJob, JobStatus, SearchQuery
 from app.scheduler import SearchScheduler
 
 
@@ -71,6 +71,12 @@ class FakeDatabase:
     def backfill_job_scores(self, limit=500):
         return 0
 
+    def list_jobs_by_status(self, status, limit=100):
+        return []
+
+    def update_job_status(self, job_id, status):
+        return None
+
 
 class FakeLinkedInClient:
     def __init__(self, behavior):
@@ -115,8 +121,47 @@ def make_config() -> Config:
         search_interval_minutes=15,
         search_last_24h_only=True,
         application_score_threshold=60,
+        telegram_enabled=False,
+        telegram_bot_token=None,
+        telegram_relevant_jobs_chat_id=None,
+        telegram_non_relevant_jobs_chat_id=None,
+        telegram_relevant_score_threshold=30,
         search_queries=[SearchQuery("Java", "Egypt")],
     )
+
+
+class _DeliveryFakeDatabase(FakeDatabase):
+    def __init__(self, rows):
+        super().__init__()
+        self._rows = rows
+        self.status_updates = []
+
+    def list_jobs_by_status(self, status, limit=100):
+        return self._rows[:limit]
+
+    def update_job_status(self, job_id, status):
+        self.status_updates.append((job_id, status.value))
+
+
+class _DeliveryFakeNotifier:
+    def __init__(self, should_succeed_by_channel):
+        self.should_succeed_by_channel = should_succeed_by_channel
+        self.sent_batches = []
+
+    def target_channel_label_for_score(self, score: int) -> str:
+        return "Relevant Jobs" if score >= 30 else "Non-Relevant Jobs"
+
+    def target_status_for_score(self, score: int):
+        return JobStatus.SENT_TO_RELEVANT_JOBS if score >= 30 else JobStatus.SENT_TO_NON_RELEVANT_JOBS
+
+    def send_jobs_batch(self, rows):
+        if not rows:
+            return True
+        ids = [int(row["id"]) for row in rows]
+        score = int(rows[0]["score"] or 0)
+        channel = self.target_channel_label_for_score(score)
+        self.sent_batches.append((channel, ids))
+        return self.should_succeed_by_channel.get(channel, False)
 
 
 def test_job_service_continues_when_single_query_fails() -> None:
@@ -203,6 +248,62 @@ def test_job_service_stops_on_access_restriction() -> None:
 
     with pytest.raises(AccessRestrictionError):
         service.run_cycle(queries)
+
+
+def test_job_service_dispatches_new_jobs_to_relevant_and_non_relevant_channels() -> None:
+    db = _DeliveryFakeDatabase(
+        [
+            {"id": 1, "score": 35, "title": "A", "company": "C", "location": "L", "url": "u1"},
+            {"id": 2, "score": 20, "title": "B", "company": "D", "location": "L", "url": "u2"},
+        ]
+    )
+    client = FakeLinkedInClient({("q1", "l1"): []})
+    notifier = _DeliveryFakeNotifier({"Relevant Jobs": True, "Non-Relevant Jobs": True})
+
+    service = JobDiscoveryService(db, client, telegram_notifier=notifier)
+    service.run_cycle([SearchQuery("q1", "l1")])
+
+    assert notifier.sent_batches == [
+        ("Relevant Jobs", [1]),
+        ("Non-Relevant Jobs", [2]),
+    ]
+    assert db.status_updates == [
+        (1, "SENT_TO_RELEVANT_JOBS"),
+        (2, "SENT_TO_NON_RELEVANT_JOBS"),
+    ]
+
+
+def test_job_service_keeps_status_new_when_telegram_delivery_fails() -> None:
+    db = _DeliveryFakeDatabase(
+        [
+            {"id": 7, "score": 55, "title": "A", "company": "C", "location": "L", "url": "u1"},
+        ]
+    )
+    client = FakeLinkedInClient({("q1", "l1"): []})
+    notifier = _DeliveryFakeNotifier({"Relevant Jobs": False})
+
+    service = JobDiscoveryService(db, client, telegram_notifier=notifier)
+    service.run_cycle([SearchQuery("q1", "l1")])
+
+    assert notifier.sent_batches == [("Relevant Jobs", [7])]
+    assert db.status_updates == []
+
+
+def test_job_service_keeps_entire_channel_batch_new_when_send_fails() -> None:
+    db = _DeliveryFakeDatabase(
+        [
+            {"id": 10, "score": 12, "title": "A", "company": "C", "location": "L", "url": "u1"},
+            {"id": 11, "score": 8, "title": "B", "company": "D", "location": "L", "url": "u2"},
+        ]
+    )
+    client = FakeLinkedInClient({("q1", "l1"): []})
+    notifier = _DeliveryFakeNotifier({"Non-Relevant Jobs": False})
+
+    service = JobDiscoveryService(db, client, telegram_notifier=notifier)
+    service.run_cycle([SearchQuery("q1", "l1")])
+
+    assert notifier.sent_batches == [("Non-Relevant Jobs", [10, 11])]
+    assert db.status_updates == []
 
 
 def test_scheduler_overlap_prevention() -> None:
