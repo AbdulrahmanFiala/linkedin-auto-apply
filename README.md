@@ -92,6 +92,14 @@ Continuous mode (immediate run + every 15 minutes):
 python -m app.main
 ```
 
+Standalone metadata backfill (fills missing title/company/description/posted/apply method for existing DB rows):
+
+```powershell
+python -m app.backfill_metadata --limit 200
+```
+
+Backfill always applies a small built-in delay between jobs to improve metadata loading reliability.
+
 ## Database
 
 SQLite file location is controlled by `SQLITE_DB_PATH` (default `data/jobs.db`).

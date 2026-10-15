@@ -3,13 +3,15 @@
 import logging
 import time
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import List
 
 from .database import Database
 from .linkedin import AccessRestrictionError, LinkedInClient
-from .models import JobStatus, SearchQuery
+from .models import DiscoveredJob, JobStatus, SearchQuery
 
 logger = logging.getLogger(__name__)
+BACKFILL_PER_JOB_DELAY_SECONDS = 0.8
 
 
 @dataclass(slots=True)
@@ -36,17 +38,33 @@ class JobDiscoveryService:
             try:
                 jobs = self.linkedin_client.search_jobs(query)
                 new_jobs, existing_jobs_for_enrichment = self.database.split_new_and_existing_jobs(jobs)
+                existing_jobs_missing_metadata = self.database.filter_existing_jobs_needing_metadata(
+                    existing_jobs_for_enrichment
+                )
                 if existing_jobs_for_enrichment:
                     logger.info(
                         "Skipping enrichment for existing DB jobs: %d/%d",
                         len(existing_jobs_for_enrichment),
                         len(jobs),
                     )
-                if new_jobs:
-                    logger.info("Enriching metadata only for new DB jobs: %d/%d", len(new_jobs), len(jobs))
-                    self.linkedin_client.enrich_metadata_for_jobs(new_jobs)
+                if existing_jobs_missing_metadata:
+                    logger.info(
+                        "Existing DB jobs needing metadata enrichment: %d/%d",
+                        len(existing_jobs_missing_metadata),
+                        len(existing_jobs_for_enrichment),
+                    )
+
+                to_enrich = [*new_jobs, *existing_jobs_missing_metadata]
+                if to_enrich:
+                    logger.info(
+                        "Enriching metadata for jobs: new=%d existing_missing=%d total=%d",
+                        len(new_jobs),
+                        len(existing_jobs_missing_metadata),
+                        len(to_enrich),
+                    )
+                    self.linkedin_client.enrich_metadata_for_jobs(to_enrich)
                 else:
-                    logger.info("No new DB jobs to enrich on this page: 0/%d", len(jobs))
+                    logger.info("No jobs require metadata enrichment on this page: 0/%d", len(jobs))
                 inserted, new_jobs, existing_jobs = self.database.upsert_jobs_bulk_detailed(jobs)
                 found = len(jobs)
                 duplicates = max(found - inserted, 0)
@@ -99,6 +117,67 @@ class JobDiscoveryService:
         if rescored:
             logger.info("Score backfill complete. rescored_jobs=%d", rescored)
         return results
+
+    def run_missing_metadata_backfill(self, limit: int = 200) -> int:
+        rows = self.database.list_jobs_needing_metadata(limit=limit)
+        if not rows:
+            logger.info("No jobs with missing metadata found for backfill")
+            return 0
+
+        logger.info("Starting standalone metadata backfill for %d jobs", len(rows))
+        jobs_with_ids: list[tuple[int, DiscoveredJob]] = []
+        for row in rows:
+            discovered_at_raw = row["discovered_at"]
+            discovered_at = datetime.now(UTC)
+            if discovered_at_raw:
+                try:
+                    discovered_at = datetime.fromisoformat(str(discovered_at_raw))
+                except ValueError:
+                    discovered_at = datetime.now(UTC)
+
+            jobs_with_ids.append(
+                (
+                    int(row["id"]),
+                    DiscoveredJob(
+                        source=str(row["source"] or "linkedin"),
+                        external_id=str(row["external_id"]) if row["external_id"] else None,
+                        url=str(row["url"] or ""),
+                        title=str(row["title"] or "Unknown title"),
+                        company=str(row["company"] or "Unknown company"),
+                        location=str(row["location"] or ""),
+                        description=str(row["description"]) if row["description"] else None,
+                        posted_at=str(row["posted_at"]) if row["posted_at"] else None,
+                        discovered_at=discovered_at,
+                        apply_method=str(row["apply_method"] or "UNKNOWN"),
+                    ),
+                )
+            )
+
+        enrich_targets = [job for _, job in jobs_with_ids if job.url]
+        if enrich_targets:
+            if len(enrich_targets) > 1:
+                logger.info(
+                    "Applying metadata backfill latency between jobs: %.2fs",
+                    BACKFILL_PER_JOB_DELAY_SECONDS,
+                )
+            for index, job in enumerate(enrich_targets):
+                if index > 0:
+                    time.sleep(BACKFILL_PER_JOB_DELAY_SECONDS)
+                logger.info("Detail enrichment progress: %d/%d", index + 1, len(enrich_targets))
+                self.linkedin_client.enrich_metadata_for_jobs([job])
+
+        for job_id, job in jobs_with_ids:
+            self.database.update_job_metadata_if_missing(
+                job_id=job_id,
+                title=job.title,
+                company=job.company,
+                description=job.description,
+                posted_at=job.posted_at,
+                apply_method=job.apply_method,
+            )
+
+        logger.info("Standalone metadata backfill finished. processed_jobs=%d", len(jobs_with_ids))
+        return len(jobs_with_ids)
 
     def _dispatch_new_jobs_to_telegram(self) -> None:
         if self.telegram_notifier is None:

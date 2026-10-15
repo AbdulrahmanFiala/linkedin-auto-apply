@@ -62,6 +62,9 @@ class FakeDatabase:
             new_jobs.append(job)
         return new_jobs, existing_jobs
 
+    def filter_existing_jobs_needing_metadata(self, jobs):
+        return []
+
     def list_jobs_needing_metadata(self, limit=50):
         return []
 
@@ -218,6 +221,23 @@ def test_job_service_enriches_only_new_jobs_against_existing_db() -> None:
     assert client.enriched_batches == [["2", "3"]]
 
 
+def test_job_service_enriches_existing_jobs_when_metadata_missing() -> None:
+    class _DbWithMissing(FakeDatabase):
+        def filter_existing_jobs_needing_metadata(self, jobs):
+            return [job for job in jobs if (job.external_id or "") == "1"]
+
+    db = _DbWithMissing()
+    db.upsert_job(make_discovered("1"))
+    query = SearchQuery("q1", "l1")
+    jobs = [make_discovered("1"), make_discovered("2")]
+    client = FakeLinkedInClient({("q1", "l1"): jobs})
+
+    service = JobDiscoveryService(db, client)
+    service.run_cycle([query])
+
+    assert client.enriched_batches == [["2", "1"]]
+
+
 def test_job_service_logs_skip_when_all_jobs_already_exist(caplog) -> None:
     db = FakeDatabase()
     db.upsert_job(make_discovered("1"))
@@ -236,7 +256,117 @@ def test_job_service_logs_skip_when_all_jobs_already_exist(caplog) -> None:
     assert results[0].duplicates == 2
     assert client.enriched_batches == []
     assert "Skipping enrichment for existing DB jobs: 2/2" in caplog.text
-    assert "No new DB jobs to enrich on this page: 0/2" in caplog.text
+    assert "No jobs require metadata enrichment on this page: 0/2" in caplog.text
+
+
+def test_run_missing_metadata_backfill_enriches_and_updates_missing_rows() -> None:
+    class _BackfillDb(FakeDatabase):
+        def __init__(self):
+            super().__init__()
+            self.updated = []
+
+        def list_jobs_needing_metadata(self, limit=50):
+            return [
+                {
+                    "id": 10,
+                    "source": "linkedin",
+                    "external_id": "10",
+                    "url": "https://www.linkedin.com/jobs/view/10",
+                    "title": "Unknown title",
+                    "company": "Unknown company",
+                    "location": "Egypt",
+                    "description": None,
+                    "posted_at": None,
+                    "discovered_at": datetime.now(UTC).isoformat(),
+                    "apply_method": ApplyMethod.UNKNOWN.value,
+                }
+            ]
+
+        def update_job_metadata_if_missing(self, job_id, title, company, description, posted_at, apply_method):
+            self.updated.append((job_id, title, company, description, posted_at, apply_method))
+
+    class _BackfillClient(FakeLinkedInClient):
+        def __init__(self):
+            super().__init__({})
+
+        def enrich_metadata_for_jobs(self, jobs):
+            super().enrich_metadata_for_jobs(jobs)
+            jobs[0].title = "Java Engineer"
+            jobs[0].company = "Acme"
+            jobs[0].description = "Spring Boot role"
+            jobs[0].posted_at = "2026-10-10T00:00:00+00:00"
+            jobs[0].apply_method = ApplyMethod.EASY_APPLY.value
+
+    db = _BackfillDb()
+    client = _BackfillClient()
+    service = JobDiscoveryService(db, client)
+
+    processed = service.run_missing_metadata_backfill(limit=25)
+
+    assert processed == 1
+    assert client.enriched_batches == [["10"]]
+    assert db.updated == [
+        (10, "Java Engineer", "Acme", "Spring Boot role", "2026-10-10T00:00:00+00:00", "EASY_APPLY")
+    ]
+
+
+def test_run_missing_metadata_backfill_applies_latency_between_jobs(monkeypatch) -> None:
+    class _BackfillDb(FakeDatabase):
+        def __init__(self):
+            super().__init__()
+            self.updated = []
+
+        def list_jobs_needing_metadata(self, limit=50):
+            now = datetime.now(UTC).isoformat()
+            return [
+                {
+                    "id": 10,
+                    "source": "linkedin",
+                    "external_id": "10",
+                    "url": "https://www.linkedin.com/jobs/view/10",
+                    "title": "Unknown title",
+                    "company": "Unknown company",
+                    "location": "Egypt",
+                    "description": None,
+                    "posted_at": None,
+                    "discovered_at": now,
+                    "apply_method": ApplyMethod.UNKNOWN.value,
+                },
+                {
+                    "id": 11,
+                    "source": "linkedin",
+                    "external_id": "11",
+                    "url": "https://www.linkedin.com/jobs/view/11",
+                    "title": "Unknown title",
+                    "company": "Unknown company",
+                    "location": "Egypt",
+                    "description": None,
+                    "posted_at": None,
+                    "discovered_at": now,
+                    "apply_method": ApplyMethod.UNKNOWN.value,
+                },
+            ]
+
+        def update_job_metadata_if_missing(self, job_id, title, company, description, posted_at, apply_method):
+            self.updated.append((job_id, title, company, description, posted_at, apply_method))
+
+    sleep_calls = []
+
+    def _fake_sleep(seconds):
+        sleep_calls.append(seconds)
+
+    monkeypatch.setattr("app.jobs.time.sleep", _fake_sleep)
+
+    db = _BackfillDb()
+    client = FakeLinkedInClient({})
+    service = JobDiscoveryService(db, client)
+
+    processed = service.run_missing_metadata_backfill(limit=25)
+
+    assert processed == 2
+    assert client.enriched_batches == [["10"], ["11"]]
+    assert sleep_calls == [0.8]
+    assert len(db.updated) == 2
 
 
 def test_job_service_stops_on_access_restriction() -> None:

@@ -499,7 +499,7 @@ class LinkedInClient:
             enriched_apply_method = 0
             enriched_description = 0
             for idx, job in enumerate(targets, start=1):
-                if idx == 1 or idx % 5 == 0 or idx == len(targets):
+                if len(targets) > 1 and (idx == 1 or idx % 5 == 0 or idx == len(targets)):
                     logger.info("Detail enrichment progress: %d/%d", idx, len(targets))
                 try:
                     detail_page.goto(job.url, wait_until="domcontentloaded", timeout=10000)

@@ -341,6 +341,58 @@ class Database:
 
         return self._run_with_lock_retry(action)
 
+    def filter_existing_jobs_needing_metadata(self, jobs: list[DiscoveredJob]) -> list[DiscoveredJob]:
+        if not jobs:
+            return []
+
+        def action() -> list[DiscoveredJob]:
+            keys = {(job.source, job.external_id or fallback_external_id(job.url)) for job in jobs}
+            placeholders = ", ".join(["(?, ?)"] * len(keys))
+            params: list[str] = []
+            for source, external_id in keys:
+                params.extend([source, external_id])
+
+            with self._connect() as conn:
+                rows = conn.execute(
+                    f"""
+                    SELECT source, external_id, title, company, description, posted_at, apply_method
+                    FROM jobs
+                    WHERE (source, external_id) IN ({placeholders})
+                    """,
+                    tuple(params),
+                ).fetchall()
+
+            missing_keys: set[tuple[str, str]] = set()
+            for row in rows:
+                title = (row["title"] or "").strip()
+                company = (row["company"] or "").strip()
+                description = (row["description"] or "").strip()
+                posted_at = (row["posted_at"] or "").strip()
+                apply_method = (row["apply_method"] or "").strip()
+                if (
+                    not title
+                    or title == "Unknown title"
+                    or not company
+                    or company == "Unknown company"
+                    or not description
+                    or not posted_at
+                    or not apply_method
+                    or apply_method == ApplyMethod.UNKNOWN.value
+                ):
+                    missing_keys.add((str(row["source"]), str(row["external_id"])))
+
+            selected: list[DiscoveredJob] = []
+            seen: set[tuple[str, str]] = set()
+            for job in jobs:
+                key = (job.source, job.external_id or fallback_external_id(job.url))
+                if key not in missing_keys or key in seen:
+                    continue
+                seen.add(key)
+                selected.append(job)
+            return selected
+
+        return self._run_with_lock_retry(action)
+
     def upsert_jobs_bulk_detailed(self, jobs: list[DiscoveredJob]) -> tuple[int, list[str], list[str]]:
         def action() -> tuple[int, list[str], list[str]]:
             inserted = 0
