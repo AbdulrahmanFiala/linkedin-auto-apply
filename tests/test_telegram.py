@@ -37,8 +37,37 @@ def test_send_jobs_batch_uses_single_message_with_horizontal_separator(monkeypat
     assert ok is True
     assert len(captured) == 1
     assert "\n----------------------------------------\n" in captured[0]
-    assert "A" in captured[0]
-    assert "B" in captured[0]
+    assert "<b>A</b>" in captured[0]
+    assert "<b>B</b>" in captured[0]
+    assert "Target Channel" not in captured[0]
+
+
+def test_send_jobs_batch_splits_into_multiple_messages_when_too_long(monkeypatch) -> None:
+    notifier = TelegramJobNotifier(
+        bot_token="token",
+        relevant_jobs_chat_id="r",
+        non_relevant_jobs_chat_id="n",
+        max_message_length=240,
+    )
+    rows = [_make_row(1, 10, "A" * 90), _make_row(2, 12, "B" * 90), _make_row(3, 9, "C" * 90)]
+
+    captured = []
+
+    def _fake_send_text(self, _chat_id, text):
+        captured.append(text)
+        return True
+
+    monkeypatch.setattr(TelegramJobNotifier, "_send_text", _fake_send_text)
+
+    ok = notifier.send_jobs_batch(rows)
+
+    assert ok is True
+    assert len(captured) == 3
+    assert all(len(message) <= notifier.max_message_length for message in captured)
+    assert "more jobs not shown" not in "\n".join(captured)
+    assert "<b>" in captured[0]
+    assert "<b>" in captured[1]
+    assert "<b>" in captured[2]
 
 
 def test_send_text_retries_on_429_and_succeeds(monkeypatch) -> None:

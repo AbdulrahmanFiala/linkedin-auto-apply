@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from html import escape
 from dataclasses import dataclass
 from urllib import error, parse, request
 
@@ -19,6 +20,7 @@ class TelegramJobNotifier:
     relevant_score_threshold: int = 30
     max_retries: int = 3
     fallback_retry_delay_seconds: int = 5
+    max_message_length: int = 3500
 
     def target_status_for_score(self, score: int) -> JobStatus:
         if score >= self.relevant_score_threshold:
@@ -46,33 +48,76 @@ class TelegramJobNotifier:
             return True
         score = int(rows[0]["score"] or 0)
         chat_id = self.target_chat_id_for_score(score)
-        separator = "\n" + ("-" * 40) + "\n"
-        text = separator.join(self._format_message(row, int(row["score"] or 0)) for row in rows)
-        return self._send_text(chat_id, text)
+        messages = self._build_channel_messages(rows)
+        for text in messages:
+            if not self._send_text(chat_id, text):
+                return False
+        return True
 
     def _format_message(self, row, score: int) -> str:
-        title = (row["title"] or "Unknown title").strip()
-        company = (row["company"] or "Unknown company").strip()
-        location = (row["location"] or "").strip()
-        url = (row["url"] or "").strip()
-        channel = self.target_channel_label_for_score(score)
+        title = escape((row["title"] or "Unknown title").strip())
+        company = escape((row["company"] or "Unknown company").strip())
+        location = escape((row["location"] or "").strip())
+        url = escape((row["url"] or "").strip())
         lines = [
-            f"{title}",
+            f"<b>{title}</b>",
             f"Company: {company}",
             f"Location: {location}",
             f"Score: {score}",
-            f"Target Channel: {channel}",
         ]
         if url:
             lines.append(f"URL: {url}")
         return "\n".join(lines)
 
+    def _build_channel_messages(self, rows: list) -> list[str]:
+        separator = "\n" + ("-" * 40) + "\n"
+        blocks = [self._format_message(row, int(row["score"] or 0)) for row in rows]
+        if not blocks:
+            return []
+
+        messages: list[str] = []
+        current_blocks: list[str] = []
+        current_length = 0
+
+        for block in blocks:
+            candidate = block if not current_blocks else f"{separator}{block}"
+            if current_length + len(candidate) <= self.max_message_length:
+                current_blocks.append(block)
+                current_length += len(candidate)
+                continue
+
+            if current_blocks:
+                messages.append(separator.join(current_blocks))
+                current_blocks = []
+                current_length = 0
+
+            if len(block) <= self.max_message_length:
+                current_blocks = [block]
+                current_length = len(block)
+                continue
+
+            start = 0
+            while start < len(block):
+                end = start + self.max_message_length
+                messages.append(block[start:end])
+                start = end
+
+        if current_blocks:
+            messages.append(separator.join(current_blocks))
+
+        return messages
+
 
     def _send_text(self, chat_id: str, text: str) -> bool:
         endpoint = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
-        payload = parse.urlencode({"chat_id": chat_id, "text": text, "disable_web_page_preview": "true"}).encode(
-            "utf-8"
-        )
+        payload = parse.urlencode(
+            {
+                "chat_id": chat_id,
+                "text": text,
+                "disable_web_page_preview": "true",
+                "parse_mode": "HTML",
+            }
+        ).encode("utf-8")
         req = request.Request(endpoint, data=payload, method="POST")
         for attempt in range(1, self.max_retries + 1):
             try:
