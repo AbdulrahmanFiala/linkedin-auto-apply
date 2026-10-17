@@ -778,6 +778,137 @@ class LinkedInClient:
                 continue
         return False
 
+    def apply_easy(self, job_id: int, row=None) -> tuple[bool, str]:
+        job_url = ""
+        if isinstance(row, dict):
+            job_url = str(row.get("url") or "").strip()
+        elif row is not None:
+            try:
+                job_url = str(row["url"] or "").strip()
+            except Exception:
+                job_url = ""
+
+        if not job_url:
+            return False, "job URL is missing"
+
+        detail_page = self.context.new_page()
+        try:
+            detail_page.goto(job_url, wait_until="domcontentloaded", timeout=20000)
+            detail_page.wait_for_timeout(1000)
+
+            apply_method = self._apply_method_from_detail_page(detail_page)
+            if apply_method != ApplyMethod.EASY_APPLY.value:
+                return False, f"job apply method is {apply_method}"
+
+            easy_apply_clicked = False
+            modal_selectors = [
+                "div[role='dialog']",
+                ".jobs-easy-apply-modal",
+                ".artdeco-modal",
+            ]
+            for selector in self.DETAIL_EASY_APPLY_SELECTORS:
+                try:
+                    button = detail_page.locator(selector).first
+                    if button.count() == 0:
+                        continue
+                    if self._is_disabled(button):
+                        return False, "Easy Apply button is disabled"
+                    button.click(timeout=5000)
+                    detail_page.wait_for_timeout(1200)
+                    for modal_selector in modal_selectors:
+                        try:
+                            detail_page.wait_for_selector(modal_selector, timeout=3500)
+                            break
+                        except Exception:
+                            continue
+                    easy_apply_clicked = True
+                    break
+                except Exception:
+                    continue
+
+            if not easy_apply_clicked:
+                return False, "Easy Apply button not found"
+
+            next_selectors = [
+                "button:has-text('Next')",
+                "button[aria-label*='Next']",
+            ]
+            review_selectors = [
+                "button:has-text('Review')",
+                "button:has-text('Review your application')",
+                "button[aria-label*='Review']",
+            ]
+            submit_selectors = [
+                "button:has-text('Submit application')",
+                "button[aria-label*='Submit application']",
+                "button:has-text('Submit')",
+            ]
+            confirmation_selectors = [
+                "text=Application sent",
+                "text=Your application was sent",
+                "button[aria-label*='Done']",
+                "button:has-text('Done')",
+            ]
+
+            max_steps = 8
+            for _ in range(max_steps):
+                for selector in submit_selectors:
+                    try:
+                        button = detail_page.locator(selector).first
+                        if button.count() == 0:
+                            continue
+                        if self._is_disabled(button):
+                            continue
+                        button.click(timeout=5000)
+                        detail_page.wait_for_timeout(1600)
+                        for confirmation_selector in confirmation_selectors:
+                            try:
+                                detail_page.wait_for_selector(confirmation_selector, timeout=4500)
+                                return True, "submitted"
+                            except Exception:
+                                continue
+                        return True, "submitted"
+                    except Exception:
+                        continue
+
+                advanced = False
+                for selector in [*next_selectors, *review_selectors]:
+                    try:
+                        button = detail_page.locator(selector).first
+                        if button.count() == 0:
+                            continue
+                        if self._is_disabled(button):
+                            continue
+                        button.click(timeout=5000)
+                        detail_page.wait_for_timeout(1200)
+                        advanced = True
+                        break
+                    except Exception:
+                        continue
+
+                if advanced:
+                    continue
+
+                validation_messages = [
+                    "text=Please enter a valid",
+                    "text=Please complete",
+                    "text=required",
+                ]
+                for selector in validation_messages:
+                    try:
+                        if detail_page.locator(selector).count() > 0:
+                            return False, "application requires additional required fields"
+                    except Exception:
+                        continue
+
+                return False, "submission requires additional steps"
+
+            return False, "submission did not complete within step limit"
+        except Exception as exc:
+            return False, str(exc)
+        finally:
+            detail_page.close()
+
     def search_jobs(self, query: SearchQuery) -> list[DiscoveredJob]:
         page = self._ensure_page()
         all_jobs: list[DiscoveredJob] = []

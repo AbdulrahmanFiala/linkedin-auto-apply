@@ -8,7 +8,7 @@ from typing import List
 
 from .database import Database
 from .linkedin import AccessRestrictionError, LinkedInClient
-from .models import DiscoveredJob, JobStatus, SearchQuery
+from .models import ApplicationStatus, ApplyMethod, DiscoveredJob, JobStatus, SearchQuery
 
 logger = logging.getLogger(__name__)
 BACKFILL_PER_JOB_DELAY_SECONDS = 0.8
@@ -112,11 +112,55 @@ class JobDiscoveryService:
                 )
 
         logger.info("Search cycle completed in %.2fs", time.time() - start)
-        self._dispatch_new_jobs_to_telegram()
+        failed_apply_notes = self.run_auto_apply_for_new_jobs(limit=500)
+        self._dispatch_new_jobs_to_telegram(job_notes=failed_apply_notes)
         rescored = self.database.backfill_job_scores(limit=500)
         if rescored:
             logger.info("Score backfill complete. rescored_jobs=%d", rescored)
         return results
+
+    def run_auto_apply_for_new_jobs(self, limit: int = 500) -> dict[int, str]:
+        rows = self.database.list_jobs_by_status(JobStatus.NEW, limit=limit)
+        eligible_rows: list = []
+        for row in rows:
+            score = int(row["score"] or 0)
+            apply_method = ""
+            try:
+                apply_method = str(row["apply_method"] or "")
+            except Exception:
+                apply_method = ""
+            if score >= 30 and apply_method == ApplyMethod.EASY_APPLY.value:
+                eligible_rows.append(row)
+
+        logger.info("Auto-apply stage: applying for %d jobs", len(eligible_rows))
+        if not eligible_rows:
+            return {}
+
+        failed_notes_by_id: dict[int, str] = {}
+        applied_rows: list = []
+        for index, row in enumerate(eligible_rows, start=1):
+            job_id = int(row["id"])
+            logger.info("Auto-apply stage: trying to apply to job %d (%d/%d)", job_id, index, len(eligible_rows))
+            applied, reason = self._try_easy_apply(job_id, row)
+            if applied:
+                self.database.create_application(job_id, ApplicationStatus.APPLIED)
+                self.database.update_job_status(job_id, JobStatus.APPLIED)
+                applied_rows.append(row)
+                continue
+
+            failed_notes_by_id[job_id] = f"Easy Apply unsuccessful: {reason}"
+
+        if self.telegram_notifier is not None and applied_rows:
+            send_jobs_batch_to_channel = getattr(self.telegram_notifier, "send_jobs_batch_to_channel", None)
+            sent = (
+                send_jobs_batch_to_channel("Applied Jobs", applied_rows)
+                if callable(send_jobs_batch_to_channel)
+                else self.telegram_notifier.send_jobs_batch(applied_rows)
+            )
+            if not sent:
+                logger.warning("Telegram delivery failed for %d applied jobs", len(applied_rows))
+
+        return failed_notes_by_id
 
     def run_missing_metadata_backfill(self, limit: int = 200) -> int:
         rows = self.database.list_jobs_needing_metadata(limit=limit)
@@ -179,7 +223,7 @@ class JobDiscoveryService:
         logger.info("Standalone metadata backfill finished. processed_jobs=%d", len(jobs_with_ids))
         return len(jobs_with_ids)
 
-    def _dispatch_new_jobs_to_telegram(self) -> None:
+    def _dispatch_new_jobs_to_telegram(self, job_notes: dict[int, str] | None = None) -> None:
         if self.telegram_notifier is None:
             return
 
@@ -193,12 +237,23 @@ class JobDiscoveryService:
         failed = 0
         grouped_rows: dict[str, list] = {}
         for row in rows:
+            job_id = int(row["id"])
             score = int(row["score"] or 0)
             channel_label = self.telegram_notifier.target_channel_label_for_score(score)
+            if job_notes and job_id in job_notes:
+                row = dict(row)
+                row["notes"] = job_notes[job_id]
+                channel_label = "Relevant Jobs"
             grouped_rows.setdefault(channel_label, []).append(row)
 
         for channel_label, channel_rows in grouped_rows.items():
-            if not self.telegram_notifier.send_jobs_batch(channel_rows):
+            send_jobs_batch_to_channel = getattr(self.telegram_notifier, "send_jobs_batch_to_channel", None)
+            if callable(send_jobs_batch_to_channel):
+                sent = send_jobs_batch_to_channel(channel_label, channel_rows)
+            else:
+                sent = self.telegram_notifier.send_jobs_batch(channel_rows)
+
+            if not sent:
                 failed += len(channel_rows)
                 logger.warning(
                     "Telegram delivery failed for %d jobs target_channel='%s'",
@@ -208,8 +263,12 @@ class JobDiscoveryService:
                 continue
 
             for row in channel_rows:
-                score = int(row["score"] or 0)
-                new_status = self.telegram_notifier.target_status_for_score(score)
+                row_id = int(row["id"])
+                if job_notes and row_id in job_notes:
+                    new_status = JobStatus.SENT_TO_RELEVANT_JOBS
+                else:
+                    row_score = int(row["score"] or 0)
+                    new_status = self.telegram_notifier.target_status_for_score(row_score)
                 self.database.update_job_status(int(row["id"]), new_status)
                 delivered += 1
 
@@ -219,3 +278,21 @@ class JobDiscoveryService:
             failed,
             len(rows) - delivered,
         )
+
+    def _try_easy_apply(self, job_id: int, row=None) -> tuple[bool, str]:
+        apply_easy = getattr(self.linkedin_client, "apply_easy", None)
+        if not callable(apply_easy):
+            return False, "apply method is not implemented"
+        try:
+            try:
+                result = apply_easy(job_id, row)
+            except TypeError:
+                result = apply_easy(job_id)
+            if isinstance(result, tuple) and len(result) == 2:
+                success, reason = bool(result[0]), str(result[1] or "")
+                return success, reason if reason.strip() else "unknown reason"
+            if isinstance(result, bool):
+                return result, "unknown reason"
+            return False, "apply method returned unexpected result"
+        except Exception as exc:
+            return False, str(exc)

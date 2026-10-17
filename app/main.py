@@ -48,6 +48,7 @@ def run_once(config, db: Database, linkedin: LinkedInClient) -> int:
             bot_token=config.telegram_bot_token,
             relevant_jobs_chat_id=config.telegram_relevant_jobs_chat_id or "",
             non_relevant_jobs_chat_id=config.telegram_non_relevant_jobs_chat_id or "",
+            applied_jobs_chat_id=config.telegram_applied_jobs_chat_id,
             relevant_score_threshold=config.telegram_relevant_score_threshold,
         )
     service = JobDiscoveryService(db, linkedin, telegram_notifier=notifier)

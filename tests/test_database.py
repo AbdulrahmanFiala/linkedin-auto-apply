@@ -191,6 +191,7 @@ def test_configuration_validation_rejects_non_localhost_cdp() -> None:
         telegram_bot_token=None,
         telegram_relevant_jobs_chat_id=None,
         telegram_non_relevant_jobs_chat_id=None,
+        telegram_applied_jobs_chat_id=None,
         telegram_relevant_score_threshold=30,
         search_queries=[SearchQuery("Java", "Egypt")],
     )
@@ -215,6 +216,7 @@ def test_configuration_validation_rejects_invalid_threshold() -> None:
         telegram_bot_token=None,
         telegram_relevant_jobs_chat_id=None,
         telegram_non_relevant_jobs_chat_id=None,
+        telegram_applied_jobs_chat_id=None,
         telegram_relevant_score_threshold=30,
         search_queries=[SearchQuery("Java", "Egypt")],
     )

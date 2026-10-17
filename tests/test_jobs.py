@@ -85,6 +85,7 @@ class FakeLinkedInClient:
     def __init__(self, behavior):
         self.behavior = behavior
         self.enriched_batches = []
+        self.apply_results = {}
 
     def search_jobs(self, query):
         result = self.behavior[(query.keyword, query.location)]
@@ -95,6 +96,9 @@ class FakeLinkedInClient:
     def enrich_metadata_for_jobs(self, jobs):
         self.enriched_batches.append([job.external_id or job.url for job in jobs])
         return None
+
+    def apply_easy(self, job_id):
+        return self.apply_results.get(job_id, (False, "apply was not attempted"))
 
 
 def make_discovered(external_id: str) -> DiscoveredJob:
@@ -128,6 +132,7 @@ def make_config() -> Config:
         telegram_bot_token=None,
         telegram_relevant_jobs_chat_id=None,
         telegram_non_relevant_jobs_chat_id=None,
+        telegram_applied_jobs_chat_id=None,
         telegram_relevant_score_threshold=30,
         search_queries=[SearchQuery("Java", "Egypt")],
     )
@@ -136,14 +141,24 @@ def make_config() -> Config:
 class _DeliveryFakeDatabase(FakeDatabase):
     def __init__(self, rows):
         super().__init__()
-        self._rows = rows
+        self._rows = [dict(r) for r in rows]
+        for row in self._rows:
+            row.setdefault("status", JobStatus.NEW.value)
         self.status_updates = []
+        self.created_applications = []
 
     def list_jobs_by_status(self, status, limit=100):
-        return self._rows[:limit]
+        return [row for row in self._rows if row.get("status") == status.value][:limit]
 
     def update_job_status(self, job_id, status):
+        for row in self._rows:
+            if int(row["id"]) == int(job_id):
+                row["status"] = status.value
         self.status_updates.append((job_id, status.value))
+
+    def create_application(self, job_id, status, notes=None):
+        self.created_applications.append((job_id, status.value, notes))
+        return len(self.created_applications)
 
 
 class _DeliveryFakeNotifier:
@@ -165,6 +180,13 @@ class _DeliveryFakeNotifier:
         channel = self.target_channel_label_for_score(score)
         self.sent_batches.append((channel, ids))
         return self.should_succeed_by_channel.get(channel, False)
+
+    def send_jobs_batch_to_channel(self, channel_label, rows):
+        if not rows:
+            return True
+        ids = [int(row["id"]) for row in rows]
+        self.sent_batches.append((channel_label, ids))
+        return self.should_succeed_by_channel.get(channel_label, False)
 
 
 def test_job_service_continues_when_single_query_fails() -> None:
@@ -434,6 +456,109 @@ def test_job_service_keeps_entire_channel_batch_new_when_send_fails() -> None:
 
     assert notifier.sent_batches == [("Non-Relevant Jobs", [10, 11])]
     assert db.status_updates == []
+
+
+def test_job_service_auto_applies_easy_apply_relevant_jobs() -> None:
+    db = _DeliveryFakeDatabase(
+        [
+            {
+                "id": 15,
+                "score": 55,
+                "apply_method": ApplyMethod.EASY_APPLY.value,
+                "title": "A",
+                "company": "C",
+                "location": "L",
+                "url": "u1",
+            }
+        ]
+    )
+    client = FakeLinkedInClient({("q1", "l1"): []})
+    client.apply_results = {15: (True, "submitted")}
+    notifier = _DeliveryFakeNotifier({"Applied Jobs": True})
+
+    service = JobDiscoveryService(db, client, telegram_notifier=notifier)
+    service.run_cycle([SearchQuery("q1", "l1")])
+
+    assert notifier.sent_batches == [("Applied Jobs", [15])]
+    assert db.status_updates == [(15, "APPLIED")]
+    assert db.created_applications == [(15, "APPLIED", None)]
+
+
+def test_job_service_sends_failed_easy_apply_to_relevant_with_note() -> None:
+    db = _DeliveryFakeDatabase(
+        [
+            {
+                "id": 16,
+                "score": 45,
+                "apply_method": ApplyMethod.EASY_APPLY.value,
+                "title": "A",
+                "company": "C",
+                "location": "L",
+                "url": "u1",
+            }
+        ]
+    )
+    client = FakeLinkedInClient({("q1", "l1"): []})
+    client.apply_results = {16: (False, "form validation failed")}
+    notifier = _DeliveryFakeNotifier({"Relevant Jobs": True})
+
+    service = JobDiscoveryService(db, client, telegram_notifier=notifier)
+    service.run_cycle([SearchQuery("q1", "l1")])
+
+    assert notifier.sent_batches == [("Relevant Jobs", [16])]
+    assert db.status_updates == [(16, "SENT_TO_RELEVANT_JOBS")]
+    assert db.created_applications == []
+
+
+def test_job_service_does_not_auto_apply_when_not_easy_apply() -> None:
+    db = _DeliveryFakeDatabase(
+        [
+            {
+                "id": 17,
+                "score": 50,
+                "apply_method": ApplyMethod.EXTERNAL.value,
+                "title": "A",
+                "company": "C",
+                "location": "L",
+                "url": "u1",
+            }
+        ]
+    )
+    client = FakeLinkedInClient({("q1", "l1"): []})
+    notifier = _DeliveryFakeNotifier({"Relevant Jobs": True})
+
+    service = JobDiscoveryService(db, client, telegram_notifier=notifier)
+    service.run_cycle([SearchQuery("q1", "l1")])
+
+    assert notifier.sent_batches == [("Relevant Jobs", [17])]
+    assert db.status_updates == [(17, "SENT_TO_RELEVANT_JOBS")]
+    assert db.created_applications == []
+
+
+def test_job_service_auto_applies_when_score_is_30() -> None:
+    db = _DeliveryFakeDatabase(
+        [
+            {
+                "id": 18,
+                "score": 30,
+                "apply_method": ApplyMethod.EASY_APPLY.value,
+                "title": "A",
+                "company": "C",
+                "location": "L",
+                "url": "u1",
+            }
+        ]
+    )
+    client = FakeLinkedInClient({("q1", "l1"): []})
+    client.apply_results = {18: (True, "submitted")}
+    notifier = _DeliveryFakeNotifier({"Applied Jobs": True})
+
+    service = JobDiscoveryService(db, client, telegram_notifier=notifier)
+    service.run_cycle([SearchQuery("q1", "l1")])
+
+    assert notifier.sent_batches == [("Applied Jobs", [18])]
+    assert db.status_updates == [(18, "APPLIED")]
+    assert db.created_applications == [(18, "APPLIED", None)]
 
 
 def test_scheduler_overlap_prevention() -> None:

@@ -27,6 +27,7 @@ class Config:
     telegram_bot_token: str | None
     telegram_relevant_jobs_chat_id: str | None
     telegram_non_relevant_jobs_chat_id: str | None
+    telegram_applied_jobs_chat_id: str | None
     telegram_relevant_score_threshold: int
     search_queries: List[SearchQuery]
 
@@ -125,6 +126,7 @@ def load_config() -> Config:
         telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN") or None,
         telegram_relevant_jobs_chat_id=os.getenv("TELEGRAM_RELEVANT_JOBS_CHAT_ID") or None,
         telegram_non_relevant_jobs_chat_id=os.getenv("TELEGRAM_NON_RELEVANT_JOBS_CHAT_ID") or None,
+        telegram_applied_jobs_chat_id=os.getenv("TELEGRAM_APPLIED_JOBS_CHAT_ID") or None,
         telegram_relevant_score_threshold=_int_env("TELEGRAM_RELEVANT_SCORE_THRESHOLD", 30),
         search_queries=_queries_from_env(),
     )

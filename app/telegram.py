@@ -17,6 +17,7 @@ class TelegramJobNotifier:
     bot_token: str
     relevant_jobs_chat_id: str
     non_relevant_jobs_chat_id: str
+    applied_jobs_chat_id: str | None = None
     relevant_score_threshold: int = 30
     max_retries: int = 3
     fallback_retry_delay_seconds: int = 5
@@ -37,6 +38,13 @@ class TelegramJobNotifier:
             return self.relevant_jobs_chat_id
         return self.non_relevant_jobs_chat_id
 
+    def target_chat_id_for_label(self, channel_label: str) -> str:
+        if channel_label == "Applied Jobs":
+            return self.applied_jobs_chat_id or self.relevant_jobs_chat_id
+        if channel_label == "Relevant Jobs":
+            return self.relevant_jobs_chat_id
+        return self.non_relevant_jobs_chat_id
+
     def send_job(self, row) -> bool:
         score = int(row["score"] or 0)
         chat_id = self.target_chat_id_for_score(score)
@@ -48,6 +56,16 @@ class TelegramJobNotifier:
             return True
         score = int(rows[0]["score"] or 0)
         chat_id = self.target_chat_id_for_score(score)
+        messages = self._build_channel_messages(rows)
+        for text in messages:
+            if not self._send_text(chat_id, text):
+                return False
+        return True
+
+    def send_jobs_batch_to_channel(self, channel_label: str, rows: list) -> bool:
+        if not rows:
+            return True
+        chat_id = self.target_chat_id_for_label(channel_label)
         messages = self._build_channel_messages(rows)
         for text in messages:
             if not self._send_text(chat_id, text):
@@ -67,6 +85,16 @@ class TelegramJobNotifier:
         ]
         if url:
             lines.append(f"URL: {url}")
+        notes = ""
+        if isinstance(row, dict):
+            notes = str(row.get("notes") or "").strip()
+        else:
+            try:
+                notes = str(row["notes"] or "").strip()
+            except Exception:
+                notes = ""
+        if notes:
+            lines.append(f"Notes: {escape(notes)}")
         return "\n".join(lines)
 
     def _build_channel_messages(self, rows: list) -> list[str]:
