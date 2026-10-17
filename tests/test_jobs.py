@@ -603,6 +603,37 @@ def test_apply_method_text_detection() -> None:
     assert client._apply_method_from_texts(["Apply on company website"]) == ApplyMethod.EXTERNAL.value
 
 
+def test_apply_method_detail_prefers_external_when_both_markers_exist() -> None:
+    client = LinkedInClient(_FakeContext(), make_config())
+    page = _FakePage(
+        url="https://www.linkedin.com/jobs/view/123",
+        title="LinkedIn Jobs",
+        content="",
+        selector_counts={
+            "button:has-text('Easy Apply')": 1,
+            "a:has-text('Apply on company website')": 1,
+        },
+    )
+
+    detected = client._apply_method_from_detail_page(page)
+    assert detected == ApplyMethod.EXTERNAL.value
+
+
+def test_apply_method_detail_detects_easy_apply_when_external_missing() -> None:
+    client = LinkedInClient(_FakeContext(), make_config())
+    page = _FakePage(
+        url="https://www.linkedin.com/jobs/view/124",
+        title="LinkedIn Jobs",
+        content="",
+        selector_counts={
+            "button:has-text('Easy Apply')": 1,
+        },
+    )
+
+    detected = client._apply_method_from_detail_page(page)
+    assert detected == ApplyMethod.EASY_APPLY.value
+
+
 def test_job_cards_with_stable_count_waits_for_late_first_page_cards() -> None:
     client = LinkedInClient(_FakeContext(), make_config())
     page = _FakeDynamicCountPage(

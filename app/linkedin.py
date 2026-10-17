@@ -672,13 +672,36 @@ class LinkedInClient:
         return ""
 
     def _apply_method_from_detail_page(self, page) -> str:
-        for selector in self.DETAIL_EASY_APPLY_SELECTORS:
+        primary_apply_controls = [
+            "button.jobs-apply-button",
+            "a.jobs-apply-button",
+            "button[aria-label*='Apply']",
+            "a[aria-label*='Apply']",
+        ]
+
+        for selector in primary_apply_controls:
             try:
-                if page.locator(selector).count() > 0:
+                locator = page.locator(selector).first
+                if locator.count() == 0:
+                    continue
+
+                text = self._safe_text(locator).lower()
+                aria_label = self._safe_attr(locator, "aria-label").lower()
+                merged = f"{text} {aria_label}".strip()
+                if not merged:
+                    continue
+
+                if "apply on company website" in merged:
+                    return ApplyMethod.EXTERNAL.value
+                if "easy apply" in merged:
                     return ApplyMethod.EASY_APPLY.value
+                if re.search(r"\bapply\b", merged):
+                    return ApplyMethod.EXTERNAL.value
             except Exception:
                 continue
 
+        # Prefer EXTERNAL when both EXTERNAL and EASY_APPLY markers exist on the page
+        # (e.g., related jobs widgets can contain "Easy Apply" while the current job is external).
         for selector in self.DETAIL_EXTERNAL_APPLY_SELECTORS:
             try:
                 if page.locator(selector).count() > 0:
@@ -686,8 +709,24 @@ class LinkedInClient:
             except Exception:
                 continue
 
+        for selector in self.DETAIL_EASY_APPLY_SELECTORS:
+            try:
+                if page.locator(selector).count() > 0:
+                    return ApplyMethod.EASY_APPLY.value
+            except Exception:
+                continue
+
         texts = self._safe_all_texts(page.locator("button, a, span"))
-        return self._apply_method_from_texts(texts)
+        for text in texts:
+            lower = text.lower()
+            if "apply on company website" in lower:
+                return ApplyMethod.EXTERNAL.value
+            if re.search(r"\bapply\b", lower) and "easy apply" not in lower:
+                return ApplyMethod.EXTERNAL.value
+        for text in texts:
+            if "easy apply" in text.lower():
+                return ApplyMethod.EASY_APPLY.value
+        return ApplyMethod.UNKNOWN.value
 
     def _title_from_detail_page(self, page) -> str:
         title = (page.title() or "").strip()
