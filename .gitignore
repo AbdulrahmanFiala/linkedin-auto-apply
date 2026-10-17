@@ -7,5 +7,7 @@ venv/
 
 # Runtime data
 data/jobs.db
+data/*.db-wal
+data/*.db-shm
 data/chrome-profile/
 !data/.gitkeep
