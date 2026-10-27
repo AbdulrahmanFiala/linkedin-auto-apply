@@ -1,7 +1,7 @@
 ﻿from __future__ import annotations
 
-import logging
 import json
+import logging
 import re
 from datetime import UTC, datetime, timedelta
 from typing import Optional
@@ -22,49 +22,73 @@ class AccessRestrictionError(RuntimeError):
 class LinkedInClient:
     PAGE_SIZE = 25
     MAX_PAGES_PER_QUERY = 20
-    NEXT_PAGE_SELECTORS = [
-        "button.artdeco-pagination__button--next",
-        "button[aria-label*='next' i]",
-        "li.artdeco-pagination__indicator--number.active + li button",
-        "li.artdeco-pagination__indicator--number--active + li button",
+    CARD_FIELD_TIMEOUT_MS = 500
+
+    RESULTS_CONTAINER_SELECTORS = [
+        ".jobs-search-results-list",
+        ".jobs-search__results-list",
+        "div.scaffold-layout__list-container",
     ]
+
     JOB_CARD_SELECTOR = ", ".join(
         [
             "li.jobs-search-results__list-item",
-            "li:has(a.job-card-list__title--link)",
+            "li.scaffold-layout__list-item",
             "li[data-occludable-job-id]",
             "div.job-card-container",
+            "div[data-job-id]",
             "li:has(a[href*='/jobs/view/'])",
         ]
     )
+
     JOB_LINK_SELECTOR = ", ".join(
         [
             "a.job-card-list__title--link",
             "a.job-card-container__link",
             "a.base-card__full-link",
             "a[href*='/jobs/view/']",
+            "a[href*='currentJobId=']",
+            "a[href*='jobPosting:']",
         ]
     )
-    TITLE_SELECTOR = "h3.base-search-card__title, a.job-card-list__title--link, h1.top-card-layout__title"
+
+    RESULTS_LINK_SELECTOR = ", ".join(
+        [
+            "a[href*='/jobs/view/']",
+            "a[href*='currentJobId=']",
+            "a[href*='jobPosting:']",
+            "a[href*='/jobs/collections/']",
+            "a[href*='/jobs/search/']",
+        ]
+    )
+
+    TITLE_SELECTOR = ", ".join(
+        [
+            "a.job-card-list__title--link",
+            "a.job-card-container__link .visually-hidden",
+            "h3.base-search-card__title",
+            "h3",
+        ]
+    )
+
     COMPANY_SELECTOR = ", ".join(
         [
-            "h4.base-search-card__subtitle a",
             "a.job-card-container__company-name",
+            "h4.base-search-card__subtitle a",
+            "span.artdeco-entity-lockup__subtitle",
             "span.job-card-container__primary-description",
-            ".topcard__org-name-link",
-            ".topcard__flavor",
         ]
     )
+
     LOCATION_SELECTOR = ", ".join(
         [
             ".job-search-card__location",
             "li.job-card-container__metadata-item",
             ".job-card-container__metadata-wrapper li",
-            ".topcard__flavor--bullet",
+            "span.artdeco-entity-lockup__caption",
         ]
     )
-    DATE_SELECTOR = "time"
-    RESULTS_LINK_FALLBACK_SELECTOR = "a[href*='/jobs/view/']"
+
     DETAIL_COMPANY_SELECTORS = ", ".join(
         [
             "a.topcard__org-name-link",
@@ -73,30 +97,25 @@ class LinkedInClient:
             ".topcard__flavor-row a",
         ]
     )
-    DETAIL_JSON_LD_SELECTOR = "script[type='application/ld+json']"
     DETAIL_DESCRIPTION_SELECTORS = ", ".join(
         [
+            "div[id^='JobDetails_AboutTheJob_']",
             ".show-more-less-html__markup",
+            "div.jobs-description__content",
             ".jobs-description-content__text",
             ".jobs-box__html-content",
             "#job-details",
         ]
     )
-    DETAIL_EASY_APPLY_SELECTORS = [
-        "button:has-text('Easy Apply')",
-        "button[aria-label*='Easy Apply']",
-        "button.jobs-apply-button:has-text('Easy Apply')",
-    ]
-    DETAIL_EXTERNAL_APPLY_SELECTORS = [
-        "a:has-text('Apply on company website')",
-        "button:has-text('Apply on company website')",
-        "a:has-text('Apply now')",
-        "button:has-text('Apply now')",
-        "a[href*='offsite']",
-        "a[href*='apply']",
-    ]
+    DETAIL_JSON_LD_SELECTOR = "script[type='application/ld+json']"
 
-    CARD_FIELD_TIMEOUT_MS = 500
+    NEXT_PAGE_SELECTORS = [
+        "button.artdeco-pagination__button--next",
+        "button[aria-label*='next' i]",
+        "button[aria-label*='suivante' i]",
+        "li.artdeco-pagination__indicator--number.active + li button",
+        "li.artdeco-pagination__indicator--number--active + li button",
+    ]
 
     def __init__(self, context: BrowserContext, config: Config):
         self.context = context
@@ -129,118 +148,56 @@ class LinkedInClient:
     def _check_access_restriction(self, page) -> None:
         url = page.url.lower()
         title = (page.title() or "").lower()
-
-        restricted_url_parts = ["/checkpoint/", "/challenge/", "/captcha/", "authwall"]
-        if any(part in url for part in restricted_url_parts):
+        if any(part in url for part in ["/checkpoint/", "/challenge/", "/captcha/", "authwall"]):
             raise AccessRestrictionError(f"LinkedIn restriction page URL detected: {page.url}")
-
-        restricted_title_parts = ["security verification", "verify your identity", "captcha challenge"]
-        if any(part in title for part in restricted_title_parts):
+        if any(part in title for part in ["security verification", "verify your identity", "captcha challenge"]):
             raise AccessRestrictionError(f"LinkedIn restriction page title detected: {page.title()}")
 
-        strong_restriction_selectors = [
-            "form[action*='checkpoint/challenge']",
-            "#captcha-internal",
-            "h1:has-text('Security Verification')",
-        ]
-        for selector in strong_restriction_selectors:
-            if page.locator(selector).count() > 0:
-                raise AccessRestrictionError(f"LinkedIn restriction element detected: selector={selector}")
+    def _normalize_job_url(self, raw_url: str) -> str:
+        value = (raw_url or "").strip()
+        if not value:
+            return ""
+        if value.startswith("/"):
+            value = f"https://www.linkedin.com{value}"
+        return value
 
     def _extract_job_id(self, url: str) -> Optional[str]:
-        match = re.search(r"/jobs/view/(\d+)", url)
-        return match.group(1) if match else None
-
-    def _normalize_job_url(self, raw_url: str) -> str:
-        url = raw_url.strip()
         if not url:
-            return ""
-        if url.startswith("/"):
-            return f"https://www.linkedin.com{url}"
-        return url
+            return None
+        match = re.search(r"/jobs/view/(\d+)", url)
+        if match:
+            return match.group(1)
+        match = re.search(r"jobPosting:(\d+)", url)
+        if match:
+            return match.group(1)
+        try:
+            current_job = parse_qs(urlparse(url).query).get("currentJobId", [""])[0]
+            return current_job if current_job.isdigit() else None
+        except Exception:
+            return None
 
     def _job_id_from_card(self, card, url: str) -> Optional[str]:
         from_url = self._extract_job_id(url)
         if from_url:
             return from_url
-        card_id = self._safe_attr(card, "data-occludable-job-id")
-        if card_id and card_id.isdigit():
-            return card_id
+        for attr in ["data-occludable-job-id", "data-job-id", "data-entity-urn"]:
+            value = self._safe_attr(card, attr)
+            if value.isdigit():
+                return value
+            match = re.search(r"jobPosting:(\d+)", value)
+            if match:
+                return match.group(1)
         return None
 
-    def _company_from_card_text(self, card, title: str, location: str) -> str:
-        texts = self._safe_all_texts(card.locator("span"))
-        if not texts:
-            return ""
-        title_l = title.lower().strip()
-        location_l = location.lower().strip()
-        for t in texts:
-            v = t.strip()
-            l = v.lower()
-            if not v:
-                continue
-            if title_l and l == title_l:
-                continue
-            if location_l and l == location_l:
-                continue
-            if any(
-                marker in l
-                for marker in ["easy apply", "promoted", "reposted", "ago", "applicants"]
-            ):
-                continue
-            # Skip location-ish phrases.
-            if any(marker in l for marker in ["remote", "hybrid", "on-site", "onsite", "egypt", "cairo"]):
-                if "," in v or "(" in v:
-                    continue
-            return v
-        return ""
-
-    def _title_from_card_text(self, card) -> str:
-        texts = self._safe_all_texts(card.locator("span"))
-        for t in texts:
-            l = t.lower().strip()
-            if not l:
-                continue
-            if any(marker in l for marker in ["easy apply", "promoted", "reposted", "ago", "applicants"]):
-                continue
-            if any(marker in l for marker in ["remote", "hybrid", "on-site", "onsite", "egypt", "cairo"]):
-                continue
-            if len(t.strip()) < 4:
-                continue
-            return t.strip()
-        return ""
-
-    def _apply_method_from_texts(self, texts: list[str]) -> str:
-        for text in texts:
-            if "easy apply" in text.lower():
-                return ApplyMethod.EASY_APPLY.value
-        for text in texts:
-            lower = text.lower()
-            if "apply on company website" in lower:
-                return ApplyMethod.EXTERNAL.value
-            if re.search(r"\bapply\b", lower) and "easy apply" not in lower:
-                return ApplyMethod.EXTERNAL.value
-        return ApplyMethod.UNKNOWN.value
-
-    def _apply_method_from_card(self, card) -> str:
-        texts = self._safe_all_texts(card.locator("span, a, button"))
-        if not texts:
-            return ApplyMethod.UNKNOWN.value
-        return self._apply_method_from_texts(texts)
-
     def _parse_relative_posted_text(self, raw_text: str, now_utc: datetime) -> str:
-        text = raw_text.strip().lower()
-        text = text.replace("reposted", "").strip()
-
+        text = raw_text.strip().lower().replace("reposted", "").strip()
         if "today" in text:
             return now_utc.isoformat()
         if "yesterday" in text:
             return (now_utc - timedelta(days=1)).isoformat()
-
         match = re.search(r"(\d+)\s*(minute|hour|day|week|month)s?\s*ago", text)
         if not match:
             return raw_text.strip()
-
         value = int(match.group(1))
         unit = match.group(2)
         if unit == "minute":
@@ -255,77 +212,13 @@ class LinkedInClient:
             dt = now_utc - timedelta(days=30 * value)
         return dt.isoformat()
 
-    def _posted_at_from_card(self, card, discovered_at: datetime) -> str:
-        time_locator = card.locator(self.DATE_SELECTOR).first
-        date_attr = self._safe_attr(time_locator, "datetime")
-        if date_attr:
-            return date_attr
-
-        date_text = self._safe_text(time_locator)
-        if date_text:
-            return self._parse_relative_posted_text(date_text, discovered_at)
-
-        for text in self._safe_all_texts(card.locator("span")):
-            lower = text.lower()
-            if any(marker in lower for marker in ["ago", "today", "yesterday"]):
-                return self._parse_relative_posted_text(text, discovered_at)
-
-        return ""
-
-    def _build_search_url(self, query: SearchQuery, start: int = 0) -> str:
-        url = (
-            "https://www.linkedin.com/jobs/search/"
-            f"?keywords={quote_plus(query.keyword)}&location={quote_plus(query.location)}"
-        )
-        if self.config.search_last_24h_only:
-            url += "&f_TPR=r86400"
-        if start > 0:
-            url += f"&start={start}"
-        return url
-
     def _scroll_results(self, page) -> None:
-        selectors = [
-            ".jobs-search-results-list",
-            ".jobs-search__results-list",
-            "div.scaffold-layout__list-container",
-        ]
-        for selector in selectors:
+        for selector in self.RESULTS_CONTAINER_SELECTORS:
             if page.locator(selector).count() == 0:
                 continue
-            stagnant = 0
-            last_height = -1
-            for _ in range(10):
-                height = page.evaluate(
-                    """
-                    (sel) => {
-                        const el = document.querySelector(sel);
-                        if (!el) return -1;
-                        el.scrollTop = el.scrollHeight;
-                        return el.scrollHeight;
-                    }
-                    """,
-                    selector,
-                )
-                page.wait_for_timeout(250)
-                if height == last_height:
-                    stagnant += 1
-                else:
-                    stagnant = 0
-                last_height = height
-                if stagnant >= 2:
-                    break
-            break
-
-    def _job_cards_with_stable_count(self, page):
-        cards = page.locator(self.JOB_CARD_SELECTOR)
-        best_count = cards.count()
-        stable_reads = 0
-        for _ in range(8):
-            for selector in [
-                ".jobs-search-results-list",
-                ".jobs-search__results-list",
-                "div.scaffold-layout__list-container",
-            ]:
+            previous_count = -1
+            stable = 0
+            for _ in range(16):
                 try:
                     page.evaluate(
                         """
@@ -340,238 +233,482 @@ class LinkedInClient:
                         selector,
                     )
                 except Exception:
-                    continue
-            try:
-                page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            except Exception:
-                pass
-            page.wait_for_timeout(250)
-            current_count = cards.count()
-            if current_count > best_count:
-                best_count = current_count
-                stable_reads = 0
-                continue
-            if current_count == best_count:
-                stable_reads += 1
-                if stable_reads >= 2 and best_count >= self.PAGE_SIZE:
+                    pass
+                page.wait_for_timeout(300)
+                count = page.locator(self.JOB_CARD_SELECTOR).count()
+                if count == previous_count:
+                    stable += 1
+                else:
+                    stable = 0
+                previous_count = count
+                if stable >= 3 and count >= self.PAGE_SIZE:
                     break
-        return cards, best_count
+            return
+
+    def _candidate_links_from_html(self, html: str) -> list[str]:
+        links: list[str] = []
+        for match in re.finditer(r"https://www\.linkedin\.com/jobs/view/(\d+)", html):
+            links.append(f"https://www.linkedin.com/jobs/view/{match.group(1)}/")
+        for match in re.finditer(r"https:\\/\\/www\.linkedin\.com\\/jobs\\/view\\/(\d+)", html):
+            links.append(f"https://www.linkedin.com/jobs/view/{match.group(1)}/")
+        for match in re.finditer(r"/jobs/view/(\d+)", html):
+            links.append(f"https://www.linkedin.com/jobs/view/{match.group(1)}/")
+        for match in re.finditer(r"urn:li:jobPosting:(\d+)", html):
+            links.append(f"https://www.linkedin.com/jobs/view/{match.group(1)}/")
+        for match in re.finditer(r"urn:li:fsd_jobPosting:(\d+)", html):
+            links.append(f"https://www.linkedin.com/jobs/view/{match.group(1)}/")
+        for match in re.finditer(r"jobPosting:(\d+)", html):
+            links.append(f"https://www.linkedin.com/jobs/view/{match.group(1)}/")
+        for match in re.finditer(r"data-occludable-job-id=[\"'](\d+)[\"']", html):
+            links.append(f"https://www.linkedin.com/jobs/view/{match.group(1)}/")
+        for match in re.finditer(r"data-job-id=[\"'](\d+)[\"']", html):
+            links.append(f"https://www.linkedin.com/jobs/view/{match.group(1)}/")
+        for match in re.finditer(r"currentJobId=(\d+)", html):
+            links.append(f"https://www.linkedin.com/jobs/view/{match.group(1)}/")
+        for match in re.finditer(r"jobPostingId%7E%3A(\d+)", html):
+            links.append(f"https://www.linkedin.com/jobs/view/{match.group(1)}/")
+        for match in re.finditer(r"jobPostingId=(\d+)", html):
+            links.append(f"https://www.linkedin.com/jobs/view/{match.group(1)}/")
+        for match in re.finditer(r"fsd_jobPosting%3A(\d+)", html):
+            links.append(f"https://www.linkedin.com/jobs/view/{match.group(1)}/")
+        # preserve order while deduplicating
+        return list(dict.fromkeys(links))
+
+    def _posted_at_from_card(self, card, discovered_at: datetime) -> str:
+        time_locator = card.locator("time").first
+        date_attr = self._safe_attr(time_locator, "datetime")
+        if date_attr:
+            return date_attr
+        date_text = self._safe_text(time_locator)
+        if date_text:
+            return self._parse_relative_posted_text(date_text, discovered_at)
+        for text in self._safe_all_texts(card.locator("span")):
+            lower = text.lower()
+            if any(x in lower for x in ["ago", "today", "yesterday"]):
+                return self._parse_relative_posted_text(text, discovered_at)
+        return ""
+
+    def _apply_method_from_texts(self, texts: list[str]) -> str:
+        for text in texts:
+            lower = text.lower()
+            if "apply on company website" in lower:
+                return ApplyMethod.EXTERNAL.value
+            if "easy apply" in lower:
+                return ApplyMethod.EASY_APPLY.value
+        for text in texts:
+            if re.search(r"\bapply\b", text.lower()):
+                return ApplyMethod.EXTERNAL.value
+        return ApplyMethod.UNKNOWN.value
+
+    def _clean_line(self, text: str) -> str:
+        return re.sub(r"\s+", " ", (text or "")).strip()
+
+    def _is_noise_line(self, text: str) -> bool:
+        lower = self._clean_line(text).lower()
+        if not lower:
+            return True
+        noise_parts = [
+            "connection works here",
+            "connections work here",
+            "company alumni work here",
+            "school alumni work here",
+            "be an early applicant",
+            "actively reviewing applicants",
+            "responses managed off linkedin",
+            "people clicked apply",
+            "easy apply",
+            "viewed",
+            "promoted",
+            "reposted",
+        ]
+        if any(part in lower for part in noise_parts):
+            return True
+        if re.search(r"\b\d+\s+(minute|hour|day|week|month)s?\s+ago\b", lower):
+            return True
+        return False
+
+    def _looks_like_location(self, text: str) -> bool:
+        value = self._clean_line(text)
+        lower = value.lower()
+        return any(token in lower for token in ["(remote)", "(hybrid)", "(on-site)", "remote", "hybrid", "on-site"]) or "," in value
+
+    def _clean_title_text(self, text: str) -> str:
+        value = self._clean_line(text)
+        value = re.sub(r"\s*\(verified job\)\s*", " ", value, flags=re.IGNORECASE)
+        return self._clean_line(value)
+
+    def _extract_card_fields_from_text(self, card, fallback_location: str) -> tuple[str, str, str]:
+        raw = ""
+        try:
+            raw = card.inner_text(timeout=self.CARD_FIELD_TIMEOUT_MS) or ""
+        except Exception:
+            raw = ""
+
+        lines: list[str] = []
+        for line in raw.splitlines():
+            cleaned = self._clean_line(line)
+            if cleaned:
+                lines.append(cleaned)
+        if not lines:
+            for value in self._safe_all_texts(card.locator("a, div, span")):
+                cleaned = self._clean_line(value)
+                if cleaned:
+                    lines.append(cleaned)
+
+        unique_lines = list(dict.fromkeys(lines))
+        useful = [line for line in unique_lines if not self._is_noise_line(line)]
+
+        title = ""
+        company = ""
+        location = ""
+
+        for line in useful:
+            if not title and not self._looks_like_location(line):
+                title = self._clean_title_text(line)
+                continue
+            if title and not company and not self._looks_like_location(line):
+                company = self._clean_line(line)
+                continue
+            if not location and self._looks_like_location(line):
+                location = self._clean_line(line)
+
+        return title, company, (location or fallback_location)
 
     def _extract_current_page_jobs(self, page, query: SearchQuery) -> list[DiscoveredJob]:
         self._check_access_restriction(page)
         self._scroll_results(page)
 
-        cards, total_cards = self._job_cards_with_stable_count(page)
         jobs: list[DiscoveredJob] = []
-        seen_urls: set[str] = set()
         seen_ids: set[str] = set()
+        seen_urls: set[str] = set()
 
-        def _collect_fallback_jobs(limit: int | None = None) -> int:
-            links = page.locator(self.RESULTS_LINK_FALLBACK_SELECTOR)
-            link_total = links.count()
-            added = 0
-            for idx in range(link_total):
-                if limit is not None and added >= limit:
-                    break
-                link = links.nth(idx)
-                href = self._normalize_job_url(self._safe_attr(link, "href"))
-                ext_id = self._extract_job_id(href)
-                if "/jobs/view/" not in href or href in seen_urls:
+        cards = page.locator(self.JOB_CARD_SELECTOR)
+        total_cards = cards.count()
+
+        ai_cards = page.locator("div[role='button'][componentkey^='job-card-component-ref-']")
+        ai_count = ai_cards.count()
+        if ai_count > total_cards:
+            total_cards = ai_count
+
+        if ai_count > 0:
+            for idx in range(ai_count):
+                card = ai_cards.nth(idx)
+                comp_key = self._safe_attr(card, "componentkey")
+                match = re.search(r"job-card-component-ref-(\d+)", comp_key)
+                ext_id = match.group(1) if match else None
+                if not ext_id or ext_id in seen_ids:
                     continue
-                if ext_id and ext_id in seen_ids:
-                    continue
-                seen_urls.add(href)
-                if ext_id:
-                    seen_ids.add(ext_id)
-                title = self._safe_text(link) or "Unknown title"
+
+                parsed_title, parsed_company, parsed_location = self._extract_card_fields_from_text(card, query.location)
+                title = parsed_title or "Unknown title"
+                company = parsed_company or "Unknown company"
+                location = parsed_location or query.location
+
+                discovered_at = datetime.now(UTC)
                 jobs.append(
                     DiscoveredJob(
                         source="linkedin",
                         external_id=ext_id,
-                        url=href,
+                        url=f"https://www.linkedin.com/jobs/view/{ext_id}/",
                         title=title,
-                        company="Unknown company",
-                        location=query.location,
+                        company=company,
+                        location=location,
                         description=None,
                         posted_at="",
-                        discovered_at=datetime.now(UTC),
+                        discovered_at=discovered_at,
                         apply_method=ApplyMethod.UNKNOWN.value,
                     )
                 )
-                added += 1
-            return added
+                seen_ids.add(ext_id)
+                seen_urls.add(f"https://www.linkedin.com/jobs/view/{ext_id}/")
 
-        if total_cards == 0:
-            link_total = page.locator(self.RESULTS_LINK_FALLBACK_SELECTOR).count()
-            logger.info("Fallback link candidates=%d", link_total)
-            _collect_fallback_jobs()
-            logger.info("Fallback unique jobs=%d", len(jobs))
-            return jobs
+            if ai_count < self.PAGE_SIZE:
+                try:
+                    page.evaluate(
+                        """
+                        () => {
+                            const leftPane = document.querySelector('[data-testid="lazy-column"]') || document.querySelector('main');
+                            if (!leftPane) return;
+                            leftPane.scrollTop = leftPane.scrollHeight;
+                        }
+                        """
+                    )
+                    page.wait_for_timeout(500)
+                except Exception:
+                    pass
 
-        skip_no_url = 0
-        skip_non_job_url = 0
-        skip_duplicate_url = 0
-        skip_duplicate_id = 0
         for idx in range(total_cards):
             card = cards.nth(idx)
             link = card.locator(self.JOB_LINK_SELECTOR).first
             url = self._normalize_job_url(self._safe_attr(link, "href"))
             ext_id = self._job_id_from_card(card, url)
-
-            if not url and not ext_id:
-                skip_no_url += 1
-                continue
-            if url and "/jobs/view/" not in url and not ext_id:
-                skip_non_job_url += 1
-                continue
-            if url and url in seen_urls:
-                skip_duplicate_url += 1
-                continue
-            if ext_id and ext_id in seen_ids:
-                skip_duplicate_id += 1
-                continue
-
             if ext_id and not url:
                 url = f"https://www.linkedin.com/jobs/view/{ext_id}/"
-            if url:
-                seen_urls.add(url)
-            if ext_id:
-                seen_ids.add(ext_id)
+            if not ext_id and not url:
+                continue
+            if ext_id and ext_id in seen_ids:
+                continue
+            if url and url in seen_urls:
+                continue
 
-            title = self._safe_text(card.locator(self.TITLE_SELECTOR).first) or self._safe_text(link)
-            if not title:
-                title = self._title_from_card_text(card)
-            company = self._safe_text(card.locator(self.COMPANY_SELECTOR).first)
-            location = self._safe_text(card.locator(self.LOCATION_SELECTOR).first)
-            if not company:
-                company = self._company_from_card_text(card, title, location)
+            title = self._safe_text(card.locator(self.TITLE_SELECTOR).first) or self._safe_text(link) or "Unknown title"
+            company = self._safe_text(card.locator(self.COMPANY_SELECTOR).first) or "Unknown company"
+            location = self._safe_text(card.locator(self.LOCATION_SELECTOR).first) or query.location
+
+            parsed_title, parsed_company, parsed_location = self._extract_card_fields_from_text(card, query.location)
+            title = self._clean_title_text(title)
+            if (not title or title == "Unknown title" or self._is_noise_line(title)) and parsed_title:
+                title = parsed_title
+            if title.lower().startswith("selected") and parsed_title:
+                title = parsed_title
+
+            if (not company or company == "Unknown company" or self._is_noise_line(company)) and parsed_company:
+                company = parsed_company
+            company = self._clean_line(company) or "Unknown company"
+
+            if (not location or location == query.location or self._is_noise_line(location)) and parsed_location:
+                location = parsed_location
+            location = self._clean_line(location) or query.location
+
             discovered_at = datetime.now(UTC)
             posted_at = self._posted_at_from_card(card, discovered_at)
-            apply_method = self._apply_method_from_card(card)
+            apply_method = self._apply_method_from_texts(self._safe_all_texts(card.locator("span, a, button")))
 
             jobs.append(
                 DiscoveredJob(
                     source="linkedin",
                     external_id=ext_id,
                     url=url,
-                    title=title or "Unknown title",
-                    company=company or "Unknown company",
-                    location=location or query.location,
+                    title=title,
+                    company=company,
+                    location=location,
                     description=None,
                     posted_at=posted_at,
                     discovered_at=discovered_at,
                     apply_method=apply_method,
                 )
             )
+            if ext_id:
+                seen_ids.add(ext_id)
+            if url:
+                seen_urls.add(url)
 
-        logger.info(
-            "Primary unique jobs on page=%d (raw_cards=%d, skipped: no_url=%d non_job_url=%d dup_url=%d dup_id=%d)",
-            len(jobs),
-            total_cards,
-            skip_no_url,
-            skip_non_job_url,
-            skip_duplicate_url,
-            skip_duplicate_id,
-        )
-
-        if len(jobs) < min(total_cards, self.PAGE_SIZE):
-            missing = min(total_cards, self.PAGE_SIZE) - len(jobs)
-            added_from_fallback = _collect_fallback_jobs(limit=missing)
-            if added_from_fallback:
-                logger.info(
-                    "Supplemented page jobs via fallback links: +%d (now=%d)",
-                    added_from_fallback,
-                    len(jobs),
+        try:
+            html = page.content()
+        except Exception:
+            html = ""
+        for href in self._candidate_links_from_html(html):
+            url = self._normalize_job_url(href)
+            ext_id = self._extract_job_id(url)
+            if ext_id and ext_id in seen_ids:
+                continue
+            if url in seen_urls:
+                continue
+            jobs.append(
+                DiscoveredJob(
+                    source="linkedin",
+                    external_id=ext_id,
+                    url=url,
+                    title="Unknown title",
+                    company="Unknown company",
+                    location=query.location,
+                    description=None,
+                    posted_at="",
+                    discovered_at=datetime.now(UTC),
+                    apply_method=ApplyMethod.UNKNOWN.value,
                 )
+            )
+            if ext_id:
+                seen_ids.add(ext_id)
+            seen_urls.add(url)
+
+        # AI jobs surface often exposes additional jobs as links with currentJobId.
+        links = page.locator("a[href*='currentJobId='], a[href*='/jobs/view/']")
+        for idx in range(links.count()):
+            href = self._normalize_job_url(self._safe_attr(links.nth(idx), "href"))
+            ext_id = self._extract_job_id(href)
+            if not ext_id:
+                continue
+            canonical_url = f"https://www.linkedin.com/jobs/view/{ext_id}/"
+            if ext_id in seen_ids or canonical_url in seen_urls:
+                continue
+            title = self._safe_text(links.nth(idx)) or "Unknown title"
+            jobs.append(
+                DiscoveredJob(
+                    source="linkedin",
+                    external_id=ext_id,
+                    url=canonical_url,
+                    title=title,
+                    company="Unknown company",
+                    location=query.location,
+                    description=None,
+                    posted_at="",
+                    discovered_at=datetime.now(UTC),
+                    apply_method=ApplyMethod.UNKNOWN.value,
+                )
+            )
+            seen_ids.add(ext_id)
+            seen_urls.add(canonical_url)
+
+        logger.info("Extracted jobs from page: cards=%d unique=%d", total_cards, len(jobs))
         return jobs
 
-    def enrich_metadata_for_jobs(self, jobs: list[DiscoveredJob]) -> None:
-        targets = [job for job in jobs if job.url]
-        if not targets:
-            return
+    def _build_search_url(self, query: SearchQuery, start: int = 0) -> str:
+        keywords = query.keyword.strip()
+        lowered = keywords.lower()
+        suffix = " posted in the past 24 hours"
+        if lowered.endswith(suffix):
+            keywords = keywords[: -len(suffix)].strip()
 
-        detail_page = self.context.new_page()
+        url = (
+            "https://www.linkedin.com/jobs/search/"
+            f"?keywords={quote_plus(keywords)}"
+            f"&location={quote_plus(query.location)}"
+        )
+        if self.config.search_last_24h_only:
+            url += "&f_TPR=r86400"
+        if start > 0:
+            url += f"&start={start}"
+        return url
+
+    def _start_from_url(self, url: str) -> int:
         try:
-            logger.info("Starting detail enrichment for %d jobs", len(targets))
-            enriched_company = 0
-            enriched_posted = 0
-            enriched_title = 0
-            enriched_apply_method = 0
-            enriched_description = 0
-            for idx, job in enumerate(targets, start=1):
-                if len(targets) > 1 and (idx == 1 or idx % 5 == 0 or idx == len(targets)):
-                    logger.info("Detail enrichment progress: %d/%d", idx, len(targets))
-                try:
-                    detail_page.goto(job.url, wait_until="domcontentloaded", timeout=10000)
-                    detail_page.wait_for_timeout(600)
-                    company = self._company_from_detail_page(detail_page)
-                    if company and job.company == "Unknown company":
-                        job.company = company
-                        enriched_company += 1
-                    if not job.title or job.title == "Unknown title":
-                        title = self._title_from_detail_page(detail_page)
-                        if title:
-                            job.title = title
-                            enriched_title += 1
-                    if not job.posted_at:
-                        posted = self._posted_at_from_detail_page(detail_page, job.discovered_at)
-                        if posted:
-                            job.posted_at = posted
-                            enriched_posted += 1
-                    if not job.description or not job.description.strip():
-                        description = self._description_from_detail_page(detail_page)
-                        if description:
-                            job.description = description
-                            enriched_description += 1
-                    apply_method = self._apply_method_from_detail_page(detail_page)
-                    if (
-                        apply_method != ApplyMethod.UNKNOWN.value
-                        and (
-                            job.apply_method == ApplyMethod.UNKNOWN.value
-                            or (
-                                apply_method == ApplyMethod.EASY_APPLY.value
-                                and job.apply_method == ApplyMethod.EXTERNAL.value
-                            )
-                        )
-                    ):
-                        job.apply_method = apply_method
-                        enriched_apply_method += 1
-                except Exception:
-                    logger.debug("Failed detail enrichment for job url=%s", job.url, exc_info=True)
+            return int(parse_qs(urlparse(url).query).get("start", ["0"])[0])
+        except Exception:
+            return 0
+
+    def _is_disabled(self, locator) -> bool:
+        return (
+            bool(self._safe_attr(locator, "disabled"))
+            or self._safe_attr(locator, "aria-disabled").lower() == "true"
+            or "disabled" in self._safe_attr(locator, "class").lower()
+        )
+
+    def _click_next_page(self, page) -> bool:
+        for selector in self.NEXT_PAGE_SELECTORS:
+            try:
+                button = page.locator(selector).first
+                if button.count() == 0 or self._is_disabled(button):
+                    continue
+                button.click(timeout=4000)
+                page.wait_for_timeout(1400)
+                return True
+            except Exception:
+                continue
+        return False
+
+    def _next_start_from_pagination(self, page, current_start: int) -> int | None:
+        starts: set[int] = set()
+        links = page.locator("a[href*='start=']")
+        for idx in range(links.count()):
+            href = self._safe_attr(links.nth(idx), "href")
+            match = re.search(r"[?&]start=(\d+)", href)
+            if match:
+                starts.add(int(match.group(1)))
+        higher = sorted(x for x in starts if x > current_start)
+        return higher[0] if higher else None
+
+    def _max_page_number(self, page) -> int:
+        max_page = 0
+        buttons = page.locator("button[aria-label*='Page']")
+        for idx in range(buttons.count()):
+            label = self._safe_attr(buttons.nth(idx), "aria-label")
+            match = re.search(r"(\d+)", label)
+            if match:
+                max_page = max(max_page, int(match.group(1)))
+        return max_page
+
+    def search_jobs(self, query: SearchQuery) -> list[DiscoveredJob]:
+        page = self._ensure_page()
+        all_jobs: list[DiscoveredJob] = []
+        seen_keys: set[str] = set()
+        seen_page_signatures: set[tuple[str, ...]] = set()
+        visited_starts: set[int] = set()
+
+        start = 0
+        page_count = 0
+        while page_count < self.MAX_PAGES_PER_QUERY:
+            if start in visited_starts:
+                logger.info("Pagination loop detected at start=%d", start)
+                break
+            visited_starts.add(start)
+            page_count += 1
+
+            search_url = self._build_search_url(query, start)
+            logger.info("Navigating to %s", search_url)
+            page.goto(search_url, wait_until="domcontentloaded", timeout=45000)
+            page.wait_for_timeout(1200)
+            self._check_access_restriction(page)
+
+            try:
+                page.wait_for_selector(self.RESULTS_LINK_SELECTOR, timeout=8000)
+            except TimeoutError:
+                logger.info("No job link selector appeared for query '%s'", query.keyword)
+
+            page_jobs = self._extract_current_page_jobs(page, query)
+            if not page_jobs:
+                logger.info("No jobs found at start=%d", start)
+                break
+
+            signature = tuple((j.external_id or j.url) for j in page_jobs[:15])
+            if signature in seen_page_signatures:
+                logger.info("Repeated page signature at start=%d", start)
+                break
+            seen_page_signatures.add(signature)
+
+            new_count = 0
+            for job in page_jobs:
+                key = job.external_id or job.url
+                if not key or key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                all_jobs.append(job)
+                new_count += 1
+
             logger.info(
-                "Detail enrichment complete: company_enriched=%d posted_at_enriched=%d description_enriched=%d apply_method_enriched=%d unknown_company_remaining=%d missing_posted_remaining=%d unknown_apply_remaining=%d",
-                enriched_company,
-                enriched_posted,
-                enriched_description,
-                enriched_apply_method,
-                len([j for j in jobs if j.company == "Unknown company"]),
-                len([j for j in jobs if not j.posted_at]),
-                len([j for j in jobs if j.apply_method == ApplyMethod.UNKNOWN.value]),
+                "Page processed query='%s' start=%d page_jobs=%d new_jobs=%d total=%d",
+                query.keyword,
+                start,
+                len(page_jobs),
+                new_count,
+                len(all_jobs),
             )
-            logger.info(
-                "Detail enrichment title stats: title_enriched=%d unknown_title_remaining=%d",
-                enriched_title,
-                len([j for j in jobs if not j.title or j.title == "Unknown title"]),
-            )
-        finally:
-            detail_page.close()
+
+            current_page_num = (start // self.PAGE_SIZE) + 1
+            max_page_num = self._max_page_number(page)
+            if max_page_num > 0 and current_page_num >= max_page_num:
+                logger.info("Reached last visible page (%d/%d)", current_page_num, max_page_num)
+                break
+
+            if self._click_next_page(page):
+                next_start = self._start_from_url(page.url)
+                if next_start <= start:
+                    next_start = start + self.PAGE_SIZE
+                start = next_start
+                continue
+
+            next_start = self._next_start_from_pagination(page, start)
+            if next_start is None:
+                next_start = start + self.PAGE_SIZE
+            if new_count == 0 and next_start > start:
+                logger.info("No new jobs at start=%d and no effective UI pagination; stopping", start)
+                break
+            start = next_start
+
+        return all_jobs
 
     def _company_from_detail_page(self, page) -> str:
         company = self._safe_text(page.locator(self.DETAIL_COMPANY_SELECTORS).first)
         if company:
             return company
-
         scripts = page.locator(self.DETAIL_JSON_LD_SELECTOR)
         for i in range(scripts.count()):
             try:
-                content = scripts.nth(i).text_content(timeout=600)
+                content = scripts.nth(i).text_content(timeout=700)
                 if not content:
                     continue
                 payload = json.loads(content)
-                if isinstance(payload, list):
-                    items = payload
-                else:
-                    items = [payload]
+                items = payload if isinstance(payload, list) else [payload]
                 for item in items:
                     if not isinstance(item, dict):
                         continue
@@ -582,47 +719,45 @@ class LinkedInClient:
                             return name.strip()
             except Exception:
                 continue
-
-        title = (page.title() or "").strip()
-        parts = [p.strip() for p in title.split("|") if p.strip()]
-        if len(parts) >= 2:
-            candidate = parts[1]
-            if candidate.lower() != "linkedin":
-                return candidate
-        if " at " in title:
-            # Example: "Role at Company | LinkedIn"
-            rhs = title.split(" at ", 1)[1]
-            company_guess = rhs.split("|", 1)[0].strip()
-            if company_guess:
-                return company_guess
         return ""
 
+    def _title_from_detail_page(self, page) -> str:
+        title = (page.title() or "").strip()
+        parts = [p.strip() for p in title.split("|") if p.strip()]
+        return parts[0] if parts else ""
+
     def _posted_at_from_detail_page(self, page, discovered_at: datetime) -> str:
-        # LinkedIn top card frequently contains text like "Posted 2 days ago" or "7 hours ago".
-        span_texts = self._safe_all_texts(page.locator("span"))
-        for text in span_texts:
+        for text in self._safe_all_texts(page.locator("time, span")):
             lower = text.lower()
             posted_match = re.search(r"posted\s+(.+)$", lower)
             if posted_match:
                 return self._parse_relative_posted_text(posted_match.group(1), discovered_at)
-            if any(marker in lower for marker in ["ago", "today", "yesterday"]):
+            if any(x in lower for x in ["ago", "today", "yesterday"]):
                 return self._parse_relative_posted_text(text, discovered_at)
         return ""
 
     def _description_from_detail_page(self, page) -> str:
-        locator = page.locator(self.DETAIL_DESCRIPTION_SELECTORS).first
-        description = ""
-        try:
-            description = (locator.inner_text(timeout=3000) or "").strip()
-        except Exception:
-            description = self._safe_text(locator)
-        if description:
-            return re.sub(r"\s+", " ", description).strip()
+        locators = [
+            page.locator("div[id^='JobDetails_AboutTheJob_']").first,
+            page.locator(self.DETAIL_DESCRIPTION_SELECTORS).first,
+        ]
+        for locator in locators:
+            try:
+                text = (locator.inner_text(timeout=4000) or "").strip()
+            except Exception:
+                continue
+            if not text:
+                continue
+            normalized = re.sub(r"\s+", " ", text).strip()
+            if normalized.lower().startswith("about the job "):
+                normalized = normalized[len("about the job ") :].strip()
+            if normalized and normalized.lower() != "about the job":
+                return normalized
 
         scripts = page.locator(self.DETAIL_JSON_LD_SELECTOR)
         for i in range(scripts.count()):
             try:
-                content = scripts.nth(i).text_content(timeout=600)
+                content = scripts.nth(i).text_content(timeout=700)
                 if not content:
                     continue
                 payload = json.loads(content)
@@ -632,238 +767,55 @@ class LinkedInClient:
                         continue
                     raw = item.get("description")
                     if isinstance(raw, str) and raw.strip():
-                        text = re.sub(r"<[^>]+>", " ", raw)
-                        text = re.sub(r"\s+", " ", text).strip()
-                        if text:
-                            return text
+                        cleaned = re.sub(r"<[^>]+>", " ", raw)
+                        return re.sub(r"\s+", " ", cleaned).strip()
             except Exception:
                 continue
-
-        try:
-            body_text = page.locator("body").inner_text(timeout=4000)
-        except Exception:
-            body_text = ""
-
-        normalized = re.sub(r"\s+", " ", body_text or "").strip()
-        if not normalized:
-            return ""
-
-        low = normalized.lower()
-        about_idx = low.find("about the job")
-        if about_idx != -1:
-            segment = normalized[about_idx + len("about the job") : about_idx + len("about the job") + 7000]
-            stop_markers = [
-                "people also viewed",
-                "jobs you may like",
-                "set alert for similar jobs",
-                "meet the hiring team",
-                "about the company",
-                "report this job",
-            ]
-            segment_low = segment.lower()
-            cut = len(segment)
-            for marker in stop_markers:
-                idx = segment_low.find(marker)
-                if idx != -1 and idx < cut:
-                    cut = idx
-            segment = segment[:cut].strip(" |-:")
-            if len(segment) >= 80:
-                return segment
         return ""
 
     def _apply_method_from_detail_page(self, page) -> str:
-        primary_apply_controls = [
-            "button.jobs-apply-button",
-            "a.jobs-apply-button",
-            "button[aria-label*='Apply']",
-            "a[aria-label*='Apply']",
-        ]
-
-        for selector in primary_apply_controls:
-            try:
-                locator = page.locator(selector).first
-                if locator.count() == 0:
-                    continue
-
-                text = self._safe_text(locator).lower()
-                aria_label = self._safe_attr(locator, "aria-label").lower()
-                merged = f"{text} {aria_label}".strip()
-                if not merged:
-                    continue
-
-                if "apply on company website" in merged:
-                    return ApplyMethod.EXTERNAL.value
-                if "easy apply" in merged:
-                    return ApplyMethod.EASY_APPLY.value
-                if re.search(r"\bapply\b", merged):
-                    return ApplyMethod.EXTERNAL.value
-            except Exception:
-                continue
-
-        # Prefer EXTERNAL when both EXTERNAL and EASY_APPLY markers exist on the page
-        # (e.g., related jobs widgets can contain "Easy Apply" while the current job is external).
-        for selector in self.DETAIL_EXTERNAL_APPLY_SELECTORS:
-            try:
-                if page.locator(selector).count() > 0:
-                    return ApplyMethod.EXTERNAL.value
-            except Exception:
-                continue
-
-        for selector in self.DETAIL_EASY_APPLY_SELECTORS:
-            try:
-                if page.locator(selector).count() > 0:
-                    return ApplyMethod.EASY_APPLY.value
-            except Exception:
-                continue
-
         texts = self._safe_all_texts(page.locator("button, a, span"))
-        for text in texts:
-            lower = text.lower()
-            if "apply on company website" in lower:
-                return ApplyMethod.EXTERNAL.value
-            if re.search(r"\bapply\b", lower) and "easy apply" not in lower:
-                return ApplyMethod.EXTERNAL.value
-        for text in texts:
-            if "easy apply" in text.lower():
-                return ApplyMethod.EASY_APPLY.value
-        return ApplyMethod.UNKNOWN.value
+        return self._apply_method_from_texts(texts)
 
-    def _title_from_detail_page(self, page) -> str:
-        title = (page.title() or "").strip()
-        parts = [p.strip() for p in title.split("|") if p.strip()]
-        if parts:
-            first = parts[0]
-            if first.lower() != "linkedin":
-                return first
-        return ""
-
-    def _next_start_from_pagination(self, page, current_start: int) -> int | None:
-        starts: set[int] = set()
-        links = page.locator("a[href*='start=']")
-        count = links.count()
-        for idx in range(count):
-            href = self._safe_attr(links.nth(idx), "href")
-            match = re.search(r"[?&]start=(\d+)", href)
-            if match:
-                starts.add(int(match.group(1)))
-
-        higher = sorted(s for s in starts if s > current_start)
-        return higher[0] if higher else None
-
-    def _start_from_url(self, url: str) -> int:
+    def enrich_metadata_for_jobs(self, jobs: list[DiscoveredJob]) -> None:
+        targets = [job for job in jobs if job.url]
+        if not targets:
+            return
+        detail_page = self.context.new_page()
         try:
-            start_value = parse_qs(urlparse(url).query).get("start", ["0"])[0]
-            return int(start_value)
-        except Exception:
-            return 0
+            for job in targets:
+                try:
+                    for attempt in range(2):
+                        detail_page.goto(job.url, wait_until="domcontentloaded", timeout=22000)
+                        try:
+                            detail_page.wait_for_selector(self.DETAIL_DESCRIPTION_SELECTORS, timeout=7000)
+                        except Exception:
+                            pass
+                        detail_page.wait_for_timeout(1400)
 
-    def _is_disabled(self, locator) -> bool:
-        disabled_attr = self._safe_attr(locator, "disabled")
-        aria_disabled = self._safe_attr(locator, "aria-disabled").lower()
-        class_name = self._safe_attr(locator, "class").lower()
-        return bool(disabled_attr) or aria_disabled == "true" or "disabled" in class_name
+                        if not job.company or job.company == "Unknown company":
+                            company = self._company_from_detail_page(detail_page)
+                            if company:
+                                job.company = company
+                        if not job.title or job.title == "Unknown title":
+                            title = self._title_from_detail_page(detail_page)
+                            if title:
+                                job.title = title
+                        if not job.posted_at:
+                            posted_at = self._posted_at_from_detail_page(detail_page, job.discovered_at)
+                            if posted_at:
+                                job.posted_at = posted_at
+                        if not job.description:
+                            description = self._description_from_detail_page(detail_page)
+                            if description:
+                                job.description = description
+                        apply_method = self._apply_method_from_detail_page(detail_page)
+                        if apply_method != ApplyMethod.UNKNOWN.value:
+                            job.apply_method = apply_method
 
-    def _click_next_page(self, page) -> bool:
-        for selector in self.NEXT_PAGE_SELECTORS:
-            try:
-                button = page.locator(selector).first
-                if button.count() == 0:
-                    continue
-                if self._is_disabled(button):
-                    continue
-                button.click(timeout=4000)
-                page.wait_for_timeout(1200)
-                return True
-            except Exception:
-                continue
-        return False
-
-    def search_jobs(self, query: SearchQuery) -> list[DiscoveredJob]:
-        page = self._ensure_page()
-        all_jobs: list[DiscoveredJob] = []
-        seen_keys: set[str] = set()
-        seen_page_fingerprints: set[tuple[str, ...]] = set()
-        visited_starts: set[int] = set()
-
-        start = 0
-        navigation_mode = "url"
-        page_count = 0
-        while True:
-            page_count += 1
-            if page_count > self.MAX_PAGES_PER_QUERY:
-                logger.info(
-                    "Stopping pagination after max pages limit (%d) for query '%s'",
-                    self.MAX_PAGES_PER_QUERY,
-                    query.keyword,
-                )
-                break
-
-            if start in visited_starts:
-                logger.info("Pagination loop detected at start=%d; stopping", start)
-                break
-            visited_starts.add(start)
-
-            if navigation_mode == "url":
-                search_url = self._build_search_url(query, start=start)
-                logger.info("Navigating to %s", search_url)
-                page.goto(search_url, wait_until="domcontentloaded", timeout=45000)
-                page.wait_for_timeout(1200)
-
-            try:
-                page.wait_for_selector(self.RESULTS_LINK_FALLBACK_SELECTOR, timeout=10000)
-            except TimeoutError:
-                logger.info("No job links appeared within wait timeout for query '%s'", query.keyword)
-
-            page_jobs = self._extract_current_page_jobs(page, query)
-            if not page_jobs:
-                logger.info("No jobs found on page start=%d; finishing pagination", start)
-                break
-
-            page_keys = tuple((job.external_id or job.url) for job in page_jobs[:10])
-            if page_keys in seen_page_fingerprints:
-                logger.info("Repeated page fingerprint at start=%d; finishing pagination", start)
-                break
-            seen_page_fingerprints.add(page_keys)
-
-            new_on_page = 0
-            for job in page_jobs:
-                key = job.external_id or job.url
-                if key in seen_keys:
-                    continue
-                seen_keys.add(key)
-                all_jobs.append(job)
-                new_on_page += 1
-
-            logger.info(
-                "Page processed for query '%s' start=%d page_jobs=%d new_jobs=%d total=%d",
-                query.keyword,
-                start,
-                len(page_jobs),
-                new_on_page,
-                len(all_jobs),
-            )
-
-            if self._click_next_page(page):
-                next_start_from_url = self._start_from_url(page.url)
-                if next_start_from_url <= start:
-                    next_start_from_url = start + self.PAGE_SIZE
-                logger.info("Moved to next page via UI pagination: start=%d", next_start_from_url)
-                start = next_start_from_url
-                navigation_mode = "ui"
-                continue
-
-            next_start = self._next_start_from_pagination(page, start)
-            if next_start is None:
-                if navigation_mode == "ui":
-                    logger.info("Reached final pagination page for query '%s'", query.keyword)
-                    break
-                next_start = start + self.PAGE_SIZE
-                logger.info(
-                    "No pagination links from start=%d; using offset fallback next_start=%d",
-                    start,
-                    next_start,
-                )
-            start = next_start
-            navigation_mode = "url"
-
-        return all_jobs
+                        if job.description:
+                            break
+                except Exception:
+                    logger.debug("Failed detail enrichment for %s", job.url, exc_info=True)
+        finally:
+            detail_page.close()

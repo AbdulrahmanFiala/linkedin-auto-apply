@@ -52,7 +52,7 @@ def _queries_from_env() -> List[SearchQuery]:
     raw = os.getenv("SEARCH_QUERIES")
     if not raw:
         return [
-            SearchQuery(keyword="Java Software Engineer", location="Egypt"),
+            SearchQuery(keyword="Java or Full Stack or Software Engineer posted in the past 24 hours", location="Egypt"),
         ]
 
     queries: list[SearchQuery] = []

@@ -60,7 +60,7 @@ Environment variables:
 
 Default searches:
 
-- `Java Software Engineer | Egypt`
+- `Java or Full Stack or Software Engineer posted in the past 24 hours`
 
 ## Manual LinkedIn Authentication
 
