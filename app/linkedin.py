@@ -107,6 +107,7 @@ class LinkedInClient:
             "#job-details",
         ]
     )
+    DETAIL_DESCRIPTION_HEADING = "About the job"
     DETAIL_JSON_LD_SELECTOR = "script[type='application/ld+json']"
 
     NEXT_PAGE_SELECTORS = [
@@ -754,6 +755,22 @@ class LinkedInClient:
             if normalized and normalized.lower() != "about the job":
                 return normalized
 
+        # LinkedIn's newer job detail layout uses generated class names and no
+        # stable AboutTheJob id. The section can still be identified by its
+        # accessible heading; its grandparent contains the complete description.
+        try:
+            headings = page.get_by_text(self.DETAIL_DESCRIPTION_HEADING, exact=True)
+            for index in range(headings.count()):
+                section = headings.nth(index).locator("xpath=../..")
+                text = (section.inner_text(timeout=2000) or "").strip()
+                normalized = re.sub(r"\s+", " ", text).strip()
+                normalized = re.sub(r"^About the job\s*", "", normalized, flags=re.IGNORECASE)
+                normalized = re.sub(r"\s*(?:…|\.\.\.)\s*more\s*$", "", normalized, flags=re.IGNORECASE)
+                if normalized:
+                    return normalized
+        except Exception:
+            logger.debug("Could not extract description from About the job heading", exc_info=True)
+
         scripts = page.locator(self.DETAIL_JSON_LD_SELECTOR)
         for i in range(scripts.count()):
             try:
@@ -778,43 +795,49 @@ class LinkedInClient:
         return self._apply_method_from_texts(texts)
 
     def enrich_metadata_for_jobs(self, jobs: list[DiscoveredJob]) -> None:
-        targets = [job for job in jobs if job.url]
+        targets: list[DiscoveredJob] = []
+        seen_targets: set[str] = set()
+        for job in jobs:
+            key = job.external_id or job.url
+            if not job.url or not key or key in seen_targets:
+                continue
+            seen_targets.add(key)
+            targets.append(job)
         if not targets:
             return
         detail_page = self.context.new_page()
         try:
             for job in targets:
                 try:
-                    for attempt in range(2):
-                        detail_page.goto(job.url, wait_until="domcontentloaded", timeout=22000)
-                        try:
-                            detail_page.wait_for_selector(self.DETAIL_DESCRIPTION_SELECTORS, timeout=7000)
-                        except Exception:
-                            pass
-                        detail_page.wait_for_timeout(1400)
+                    detail_page.goto(job.url, wait_until="domcontentloaded", timeout=22000)
+                    try:
+                        detail_page.locator(
+                            f"{self.DETAIL_DESCRIPTION_SELECTORS}, "
+                            f"h2:has-text('{self.DETAIL_DESCRIPTION_HEADING}')"
+                        ).first.wait_for(state="visible", timeout=7000)
+                    except Exception:
+                        pass
+                    detail_page.wait_for_timeout(800)
 
-                        if not job.company or job.company == "Unknown company":
-                            company = self._company_from_detail_page(detail_page)
-                            if company:
-                                job.company = company
-                        if not job.title or job.title == "Unknown title":
-                            title = self._title_from_detail_page(detail_page)
-                            if title:
-                                job.title = title
-                        if not job.posted_at:
-                            posted_at = self._posted_at_from_detail_page(detail_page, job.discovered_at)
-                            if posted_at:
-                                job.posted_at = posted_at
-                        if not job.description:
-                            description = self._description_from_detail_page(detail_page)
-                            if description:
-                                job.description = description
-                        apply_method = self._apply_method_from_detail_page(detail_page)
-                        if apply_method != ApplyMethod.UNKNOWN.value:
-                            job.apply_method = apply_method
-
-                        if job.description:
-                            break
+                    if not job.company or job.company == "Unknown company":
+                        company = self._company_from_detail_page(detail_page)
+                        if company:
+                            job.company = company
+                    if not job.title or job.title == "Unknown title":
+                        title = self._title_from_detail_page(detail_page)
+                        if title:
+                            job.title = title
+                    if not job.posted_at:
+                        posted_at = self._posted_at_from_detail_page(detail_page, job.discovered_at)
+                        if posted_at:
+                            job.posted_at = posted_at
+                    if not job.description:
+                        description = self._description_from_detail_page(detail_page)
+                        if description:
+                            job.description = description
+                    apply_method = self._apply_method_from_detail_page(detail_page)
+                    if apply_method != ApplyMethod.UNKNOWN.value:
+                        job.apply_method = apply_method
                 except Exception:
                     logger.debug("Failed detail enrichment for %s", job.url, exc_info=True)
         finally:
