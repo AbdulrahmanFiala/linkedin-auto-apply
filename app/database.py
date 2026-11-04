@@ -209,7 +209,7 @@ class Database:
         ext_id = job.external_id or fallback_external_id(job.url)
         existing = conn.execute(
             """
-            SELECT id, title, company, description, posted_at, discovered_at, apply_method
+            SELECT id, title, company, location, description, posted_at, discovered_at, apply_method
             FROM jobs
             WHERE source = ? AND external_id = ?
             """,
@@ -228,6 +228,20 @@ class Database:
             if existing_company in {"", "Unknown company"} and job.company and job.company != "Unknown company":
                 updates.append("company = ?")
                 values.append(job.company)
+
+            if job.detail_enriched:
+                if job.title and job.title != "Unknown title" and job.title != existing_title:
+                    if "title = ?" not in updates:
+                        updates.append("title = ?")
+                        values.append(job.title)
+                if job.company and job.company != "Unknown company" and job.company != existing_company:
+                    if "company = ?" not in updates:
+                        updates.append("company = ?")
+                        values.append(job.company)
+                existing_location = (existing["location"] or "").strip()
+                if job.location and job.location != existing_location:
+                    updates.append("location = ?")
+                    values.append(job.location)
 
             existing_description = (existing["description"] or "").strip()
             if (not existing_description) and job.description and job.description.strip():
@@ -578,10 +592,7 @@ class Database:
                     """
                     SELECT id
                     FROM jobs
-                    WHERE scored_at IS NULL
-                       OR score_keywords IS NULL
-                       OR TRIM(score_keywords) = ''
-                    ORDER BY id ASC
+                    ORDER BY id DESC
                     LIMIT ?
                     """,
                     (limit,),

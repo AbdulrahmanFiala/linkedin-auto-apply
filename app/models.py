@@ -49,6 +49,7 @@ class DiscoveredJob:
     posted_at: Optional[str]
     discovered_at: datetime
     apply_method: str = ApplyMethod.UNKNOWN.value
+    detail_enriched: bool = False
 
 
 def normalize_url(url: str) -> str:

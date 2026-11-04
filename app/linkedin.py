@@ -331,7 +331,9 @@ class LinkedInClient:
     def _looks_like_location(self, text: str) -> bool:
         value = self._clean_line(text)
         lower = value.lower()
-        return any(token in lower for token in ["(remote)", "(hybrid)", "(on-site)", "remote", "hybrid", "on-site"]) or "," in value
+        work_mode_only = lower in {"remote", "hybrid", "on-site", "on site"}
+        work_mode_suffix = bool(re.search(r"\((?:remote|hybrid|on-site|on site)\)\s*$", lower))
+        return work_mode_only or work_mode_suffix or "," in value
 
     def _clean_title_text(self, text: str) -> str:
         value = self._clean_line(text)
@@ -722,6 +724,34 @@ class LinkedInClient:
                 continue
         return ""
 
+    def _identity_from_detail_page(self, page) -> tuple[str, str, str]:
+        title = ""
+        company = ""
+        location = ""
+
+        browser_title = (page.title() or "").strip()
+        if browser_title.endswith(" | LinkedIn"):
+            identity = browser_title[: -len(" | LinkedIn")].strip()
+            if " | " in identity:
+                title, company = [part.strip() for part in identity.rsplit(" | ", 1)]
+
+        try:
+            body_text = page.locator("body").inner_text(timeout=3000) or ""
+            for raw_line in body_text.splitlines():
+                line = self._clean_line(raw_line)
+                if "·" not in line:
+                    continue
+                if not re.search(r"\b\d+\s+(?:minute|hour|day|week|month)s?\s+ago\b", line, re.IGNORECASE):
+                    continue
+                candidate = self._clean_line(line.split("·", 1)[0])
+                if candidate:
+                    location = candidate
+                    break
+        except Exception:
+            logger.debug("Could not extract location from job detail page", exc_info=True)
+
+        return title, company, location
+
     def _title_from_detail_page(self, page) -> str:
         title = (page.title() or "").strip()
         parts = [p.strip() for p in title.split("|") if p.strip()]
@@ -818,6 +848,14 @@ class LinkedInClient:
                     except Exception:
                         pass
                     detail_page.wait_for_timeout(800)
+
+                    detail_title, detail_company, detail_location = self._identity_from_detail_page(detail_page)
+                    if detail_title and detail_company:
+                        job.title = detail_title
+                        job.company = detail_company
+                        if detail_location:
+                            job.location = detail_location
+                        job.detail_enriched = True
 
                     if not job.company or job.company == "Unknown company":
                         company = self._company_from_detail_page(detail_page)

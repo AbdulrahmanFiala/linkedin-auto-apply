@@ -8,7 +8,7 @@ TITLE_PRIMARY_PATTERN = re.compile(r"\b(java|spring)\b", re.IGNORECASE)
 TITLE_SECONDARY_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("backend", re.compile(r"\bbackend\b", re.IGNORECASE)),
     ("full stack", re.compile(r"\bfull[\s-]*stack\b", re.IGNORECASE)),
-    ("software engineer", re.compile(r"\bsoftware\s+engineer\b", re.IGNORECASE)),
+    ("software engineer", re.compile(r"\bsoftware(?:\s+development)?\s+engineer\b", re.IGNORECASE)),
     ("software developer", re.compile(r"\bsoftware\s+developer\b", re.IGNORECASE)),
 )
 JAVA_PATTERN = re.compile(r"\bjava\b(?![\s-]*script\b)", re.IGNORECASE)
