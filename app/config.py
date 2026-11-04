@@ -118,7 +118,7 @@ def load_config() -> Config:
         chrome_user_data_dir=user_data,
         keep_chrome_open=_bool_env("KEEP_CHROME_OPEN", True),
         db_path=db_path,
-        search_interval_minutes=_int_env("SEARCH_INTERVAL_MINUTES", 15),
+        search_interval_minutes=_int_env("SEARCH_INTERVAL_MINUTES", 5),
         search_last_24h_only=_bool_env("SEARCH_LAST_24H_ONLY", True),
         application_score_threshold=_int_env("APPLICATION_SCORE_THRESHOLD", 60),
         telegram_enabled=_bool_env("TELEGRAM_ENABLED", False),

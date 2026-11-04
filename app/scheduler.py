@@ -4,16 +4,14 @@ import logging
 import threading
 from typing import Callable
 
-from apscheduler.schedulers.background import BackgroundScheduler
-
 logger = logging.getLogger(__name__)
 
 
 class SearchScheduler:
     def __init__(self, interval_minutes: int):
-        self.interval_minutes = interval_minutes
-        self._scheduler = BackgroundScheduler()
+        self.delay_minutes = interval_minutes
         self._lock = threading.Lock()
+        self._stop_event = threading.Event()
 
     def run_non_overlapping(self, run_once: Callable[[], None]) -> bool:
         if not self._lock.acquire(blocking=False):
@@ -26,17 +24,22 @@ class SearchScheduler:
             self._lock.release()
 
     def start(self, run_once: Callable[[], None]) -> None:
-        self.run_non_overlapping(run_once)
-        self._scheduler.add_job(
-            lambda: self.run_non_overlapping(run_once),
-            "interval",
-            minutes=self.interval_minutes,
-            id="linkedin-search",
-            coalesce=True,
-            max_instances=1,
-            replace_existing=True,
-        )
-        self._scheduler.start()
+        self._stop_event.clear()
+        while not self._stop_event.is_set():
+            try:
+                self.run_non_overlapping(run_once)
+            except Exception:
+                logger.exception(
+                    "Search cycle failed. The next cycle will start after the normal %d-minute delay",
+                    self.delay_minutes,
+                )
+            if self._stop_event.is_set():
+                break
+            logger.info(
+                "Search cycle finished. Waiting %d minutes before the next cycle",
+                self.delay_minutes,
+            )
+            self._stop_event.wait(self.delay_minutes * 60)
 
     def stop(self) -> None:
-        self._scheduler.shutdown(wait=False)
+        self._stop_event.set()

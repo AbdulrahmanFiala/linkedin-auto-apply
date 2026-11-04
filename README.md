@@ -1,6 +1,6 @@
 ﻿# LinkedIn Job Bot (CDP + Playwright)
 
-Simple Python app for LinkedIn job discovery with a persistent Chrome profile, SQLite storage, and a 15-minute scheduler.
+Simple Python app for LinkedIn job discovery with a persistent Chrome profile, SQLite storage, and a delay between completed search cycles.
 
 ## Requirements
 
@@ -48,7 +48,7 @@ Environment variables:
 - `CHROME_USER_DATA_DIR` default `./data/chrome-profile`
 - `KEEP_CHROME_OPEN` keep Chrome running on exit (`true`/`false`)
 - `SQLITE_DB_PATH` default `./data/jobs.db`
-- `SEARCH_INTERVAL_MINUTES` default `15`
+- `SEARCH_INTERVAL_MINUTES` default `5` (wait time after one cycle finishes before the next cycle starts)
 - `SEARCH_LAST_24H_ONLY` default `true` (adds LinkedIn `f_TPR=r86400`)
 - `APPLICATION_SCORE_THRESHOLD` default `60` (used for score calculation only)
 - `TELEGRAM_ENABLED` default `false`
@@ -86,7 +86,7 @@ Status summary (jobs/applications counts by status):
 python -m app.main --status
 ```
 
-Continuous mode (immediate run + every 15 minutes):
+Continuous mode (immediate run, then a 5-minute wait after each completed cycle):
 
 ```powershell
 python -m app.main

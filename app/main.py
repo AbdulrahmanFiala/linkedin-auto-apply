@@ -93,18 +93,15 @@ def main() -> int:
             return run_once(config, db, linkedin)
 
         scheduler = SearchScheduler(config.search_interval_minutes)
-        stop = False
 
         def handle_signal(*_):
-            nonlocal stop
-            stop = True
+            if scheduler:
+                scheduler.stop()
 
         signal.signal(signal.SIGINT, handle_signal)
         signal.signal(signal.SIGTERM, handle_signal)
 
         scheduler.start(lambda: run_once(config, db, linkedin))
-        while not stop:
-            time.sleep(1)
         return 0
     except KeyboardInterrupt:
         return 0
