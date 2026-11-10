@@ -331,9 +331,25 @@ class LinkedInClient:
     def _looks_like_location(self, text: str) -> bool:
         value = self._clean_line(text)
         lower = value.lower()
+        if self._looks_like_job_title(value):
+            return False
         work_mode_only = lower in {"remote", "hybrid", "on-site", "on site"}
         work_mode_suffix = bool(re.search(r"\((?:remote|hybrid|on-site|on site)\)\s*$", lower))
         return work_mode_only or work_mode_suffix or "," in value
+
+    def _looks_like_job_title(self, text: str) -> bool:
+        return bool(
+            re.search(
+                r"\b(?:developer|engineer|architect|manager|consultant|analyst|specialist|"
+                r"designer|administrator|scientist|programmer|devops|frontend|backend|"
+                r"full[\s-]*stack|mobile)\b",
+                self._clean_line(text),
+                re.IGNORECASE,
+            )
+        )
+
+    def _is_punctuation_only(self, text: str) -> bool:
+        return not bool(re.search(r"[A-Za-z0-9]", text or ""))
 
     def _clean_title_text(self, text: str) -> str:
         value = self._clean_line(text)
@@ -359,21 +375,55 @@ class LinkedInClient:
                     lines.append(cleaned)
 
         unique_lines = list(dict.fromkeys(lines))
-        useful = [line for line in unique_lines if not self._is_noise_line(line)]
+        useful = [
+            line
+            for line in unique_lines
+            if not self._is_noise_line(line) and not self._is_punctuation_only(line)
+        ]
 
         title = ""
         company = ""
         location = ""
 
-        for line in useful:
-            if not title and not self._looks_like_location(line):
-                title = self._clean_title_text(line)
-                continue
-            if title and not company and not self._looks_like_location(line):
-                company = self._clean_line(line)
-                continue
-            if not location and self._looks_like_location(line):
-                location = self._clean_line(line)
+        title_index = next(
+            (index for index, line in enumerate(useful) if self._looks_like_job_title(line)),
+            None,
+        )
+        if title_index is not None:
+            title = self._clean_title_text(useful[title_index])
+
+            company_candidates = [
+                (index, line)
+                for index, line in enumerate(useful)
+                if index != title_index
+                and not self._looks_like_job_title(line)
+                and not self._looks_like_location(line)
+            ]
+            before_title = [candidate for candidate in company_candidates if candidate[0] < title_index]
+            company_index, company = (before_title or company_candidates or [(-1, "")])[0]
+            company = self._clean_line(company)
+
+            explicit_locations = [line for line in useful if self._looks_like_location(line)]
+            if explicit_locations:
+                location = self._clean_line(explicit_locations[0])
+            elif company_index >= 0 and company_index < title_index:
+                between = [
+                    line
+                    for index, line in enumerate(useful)
+                    if company_index < index < title_index and not self._looks_like_job_title(line)
+                ]
+                if between:
+                    location = self._clean_line(between[-1])
+        else:
+            for line in useful:
+                if not title and not self._looks_like_location(line):
+                    title = self._clean_title_text(line)
+                    continue
+                if title and not company and not self._looks_like_location(line):
+                    company = self._clean_line(line)
+                    continue
+                if not location and self._looks_like_location(line):
+                    location = self._clean_line(line)
 
         return title, company, (location or fallback_location)
 

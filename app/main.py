@@ -59,6 +59,20 @@ def run_once(config, db: Database, linkedin: LinkedInClient) -> int:
         return 2
 
 
+def browser_session_is_healthy(browser, context) -> bool:
+    if browser is None or context is None:
+        return False
+    try:
+        if not browser.is_connected():
+            return False
+        pages = context.pages
+        if pages:
+            pages[0].evaluate("1")
+        return True
+    except Exception:
+        return False
+
+
 def main() -> int:
     configure_logging()
     args = parse_args()
@@ -75,7 +89,7 @@ def main() -> int:
         return 0
 
     chrome_handle = None
-    playwright = browser = context = None
+    playwright = browser = context = linkedin = None
     scheduler = None
     try:
         chrome_handle = ensure_chrome_running(config, open_linkedin=args.setup)
@@ -94,6 +108,34 @@ def main() -> int:
 
         scheduler = SearchScheduler(config.search_interval_minutes)
 
+        def ensure_browser_session() -> None:
+            nonlocal chrome_handle, playwright, browser, context, linkedin
+            if browser_session_is_healthy(browser, context):
+                return
+
+            logger.warning("Chrome or Playwright connection is unavailable; rebuilding browser session")
+            if playwright and browser:
+                cleanup_playwright(playwright, browser, close_browser=True)
+            playwright = browser = context = linkedin = None
+
+            if chrome_handle:
+                chrome_handle.terminate_if_needed(keep_open=False)
+            chrome_handle = ensure_chrome_running(config, open_linkedin=False)
+
+            connector = BrowserConnector(config)
+            playwright, browser, context = connector.connect()
+            linkedin = LinkedInClient(context, config)
+            logger.info("Chrome and Playwright session recovered")
+
+        def run_managed_cycle() -> int:
+            ensure_browser_session()
+            if linkedin is None:
+                raise RuntimeError("LinkedIn browser client is unavailable after recovery")
+            result = run_once(config, db, linkedin)
+            if not browser_session_is_healthy(browser, context):
+                logger.warning("Browser session became unavailable during the search cycle")
+            return result
+
         def handle_signal(*_):
             if scheduler:
                 scheduler.stop()
@@ -101,7 +143,7 @@ def main() -> int:
         signal.signal(signal.SIGINT, handle_signal)
         signal.signal(signal.SIGTERM, handle_signal)
 
-        scheduler.start(lambda: run_once(config, db, linkedin))
+        scheduler.start(run_managed_cycle)
         return 0
     except KeyboardInterrupt:
         return 0
@@ -115,7 +157,7 @@ def main() -> int:
         if scheduler:
             scheduler.stop()
         if playwright and browser:
-            cleanup_playwright(playwright, browser)
+            cleanup_playwright(playwright, browser, close_browser=not config.keep_chrome_open)
         if chrome_handle:
             chrome_handle.terminate_if_needed(config.keep_chrome_open)
 

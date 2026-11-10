@@ -54,7 +54,7 @@ def main() -> int:
         return 1
     finally:
         if playwright and browser:
-            cleanup_playwright(playwright, browser)
+            cleanup_playwright(playwright, browser, close_browser=not config.keep_chrome_open)
         if chrome_handle:
             chrome_handle.terminate_if_needed(config.keep_chrome_open)
 

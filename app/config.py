@@ -29,6 +29,7 @@ class Config:
     telegram_non_relevant_jobs_chat_id: str | None
     telegram_relevant_score_threshold: int
     search_queries: List[SearchQuery]
+    chrome_display: str | None = None
 
 
 def _bool_env(name: str, default: bool) -> bool:
@@ -127,6 +128,7 @@ def load_config() -> Config:
         telegram_non_relevant_jobs_chat_id=os.getenv("TELEGRAM_NON_RELEVANT_JOBS_CHAT_ID") or None,
         telegram_relevant_score_threshold=_int_env("TELEGRAM_RELEVANT_SCORE_THRESHOLD", 30),
         search_queries=_queries_from_env(),
+        chrome_display=os.getenv("CHROME_DISPLAY") or None,
     )
 
     validate_config(config)

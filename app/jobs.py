@@ -167,6 +167,15 @@ class JobDiscoveryService:
                 self.linkedin_client.enrich_metadata_for_jobs([job])
 
         for job_id, job in jobs_with_ids:
+            if job.detail_enriched:
+                update_identity = getattr(self.database, "update_job_identity_from_detail", None)
+                if update_identity:
+                    update_identity(
+                        job_id=job_id,
+                        title=job.title,
+                        company=job.company,
+                        location=job.location,
+                    )
             self.database.update_job_metadata_if_missing(
                 job_id=job_id,
                 title=job.title,

@@ -30,7 +30,7 @@ class ChromeHandle:
     app_profile_lock_file: Path | None = None
 
     def terminate_if_needed(self, keep_open: bool) -> None:
-        if self.process and self.launched_by_app and not keep_open:
+        if self.process and self.launched_by_app and not keep_open and self.process.poll() is None:
             logger.info("Terminating Chrome process launched by app")
             self.process.terminate()
             try:
@@ -68,6 +68,16 @@ def detect_chrome_executable(override_path: Optional[str] = None) -> str:
             resolved = shutil.which(name)
             if resolved:
                 candidates.append(Path(resolved))
+
+        playwright_root = os.getenv("PLAYWRIGHT_BROWSERS_PATH")
+        browser_roots = [Path(playwright_root)] if playwright_root else []
+        browser_roots.append(Path.home() / ".cache" / "ms-playwright")
+        for root in browser_roots:
+            for pattern in [
+                "chromium-*/chrome-linux/chrome",
+                "chromium-*/chrome-linux64/chrome",
+            ]:
+                candidates.extend(sorted(root.glob(pattern), reverse=True))
 
     for candidate in candidates:
         if candidate.exists():
@@ -202,14 +212,26 @@ def ensure_chrome_running(config: Config, open_linkedin: bool = False) -> Chrome
         f"--user-data-dir={config.chrome_user_data_dir}",
         "--no-first-run",
         "--no-default-browser-check",
+        "--window-size=1920,1080",
+        "--disable-dev-shm-usage",
     ]
 
     if open_linkedin:
         args.append("https://www.linkedin.com")
 
     logger.info("Launching Chrome with user data dir: %s", config.chrome_user_data_dir)
+    process_environment = os.environ.copy()
+    if config.chrome_display and os.name != "nt":
+        process_environment["DISPLAY"] = config.chrome_display
+        logger.info("Launching headful Chrome on display %s", config.chrome_display)
+    if os.name != "nt" and not process_environment.get("DISPLAY"):
+        _remove_profile_lock_if_owned(lock_file)
+        raise ChromeStartupError(
+            "Headful Chrome requires a Linux display. Set CHROME_DISPLAY (for example :99) "
+            "and start Xvfb before launching the app."
+        )
     try:
-        process = subprocess.Popen(args)
+        process = subprocess.Popen(args, env=process_environment)
     except OSError as exc:
         _remove_profile_lock_if_owned(lock_file)
         raise ChromeStartupError(f"Failed to launch Chrome: {exc}") from exc

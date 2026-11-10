@@ -585,6 +585,35 @@ class Database:
 
         self._run_with_lock_retry(action)
 
+    def update_job_identity_from_detail(
+        self,
+        job_id: int,
+        title: str,
+        company: str,
+        location: str,
+    ) -> None:
+        def action() -> None:
+            updates: list[str] = []
+            values: list[object] = []
+            if title and title.strip() and title != "Unknown title":
+                updates.append("title = ?")
+                values.append(title.strip())
+            if company and company.strip() and company != "Unknown company":
+                updates.append("company = ?")
+                values.append(company.strip())
+            if location and location.strip():
+                updates.append("location = ?")
+                values.append(location.strip())
+            if not updates:
+                return
+
+            with self.transaction() as conn:
+                values.append(job_id)
+                conn.execute(f"UPDATE jobs SET {', '.join(updates)} WHERE id = ?", tuple(values))
+                self._rescore_job_in_conn(conn, job_id)
+
+        self._run_with_lock_retry(action)
+
     def backfill_job_scores(self, limit: int = 500) -> int:
         def action() -> int:
             with self.transaction() as conn:

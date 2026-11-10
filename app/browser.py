@@ -33,9 +33,10 @@ class BrowserConnector:
         )
 
 
-def cleanup_playwright(playwright, browser: Browser) -> None:
+def cleanup_playwright(playwright, browser: Browser, close_browser: bool = True) -> None:
     try:
-        browser.close()
+        if close_browser:
+            browser.close()
     except Exception:
         logger.debug("Ignoring browser close error", exc_info=True)
     finally:
